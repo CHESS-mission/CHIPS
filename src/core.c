@@ -10,6 +10,7 @@
 #define CRC16_KERMIT_POLYNOMIAL ((uint16_t)0x8408u)
 
 static uint16_t crc16_kermit_table[CHIPS_CRC16_KERMIT_FOLD][256];
+static int crc16_kermit_init;
 
 static void chips_crc16_kermit_build_base_table(void) {
     unsigned byte;
@@ -42,8 +43,11 @@ static void chips_crc16_kermit_build_slicing_tables(void) {
 }
 
 void chips_crc16_kermit_init(void) {
-    chips_crc16_kermit_build_base_table();
-    chips_crc16_kermit_build_slicing_tables();
+    if (crc16_kermit_init == 0) {
+        chips_crc16_kermit_build_base_table();
+        chips_crc16_kermit_build_slicing_tables();
+        crc16_kermit_init = 1;
+    }
 }
 
 uint16_t chips_crc16_kermit_compute(const uint8_t* data, size_t length, uint16_t crc) {
@@ -311,6 +315,7 @@ static chips_dec_status_t chips_dec_close(const chips_decoder_t* dec, chips_fram
     frame->cmd = (uint8_t)(dec->hdr[1] & CHIPS_CMD_MASK);
     frame->payload = dec->payload;
     frame->payload_len = payload_len;
+    frame->crc = crc;
 
     return CHIPS_DEC_FRAME;
 }
@@ -332,6 +337,17 @@ size_t chips_decoder_reset(chips_decoder_t* dec) {
     dec->len = 0u;
     dec->state = CHIPS_RX_HUNT;
     return len;
+}
+
+void chips_decoder_set_buffer(chips_decoder_t* dec, uint8_t payload_buf[CHIPS_MAX_PAYLOAD]) {
+    if (dec == NULL) {
+        return;
+    }
+    CHIPS_ASSERT(dec->len <= CHIPS_HEADER_SIZE);
+    if (dec->len > CHIPS_HEADER_SIZE) {
+        (void)chips_decoder_reset(dec);
+    }
+    dec->payload = payload_buf;
 }
 
 #define CHIPS_DEC_CONTINUE CHIPS_DEC_NEED_MORE
@@ -470,5 +486,8 @@ chips_dec_status_t chips_decode(chips_decoder_t* dec,
     }
 
     *consumed = (size_t)(cur.p - in);
+    CHIPS_ASSERT(*consumed > 0u && *consumed <= in_len);
+    CHIPS_ASSERT(st != CHIPS_DEC_NEED_MORE || *consumed == in_len);
+
     return st;
 }

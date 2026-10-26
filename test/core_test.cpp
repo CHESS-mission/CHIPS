@@ -16,7 +16,7 @@ const bool kermit_init = [] {
     return true;
 }();
 
-class ChipsCodecTest : public ::testing::Test {
+class CoreTest : public ::testing::Test {
   protected:
     void SetUp() override {
         std::memset(&m_dec, 0, sizeof(m_dec));
@@ -60,12 +60,12 @@ class ChipsCodecTest : public ::testing::Test {
     chips_frame_t m_frame{};
 };
 
-TEST(ChipsCrc, KermitCheckValue) {
+TEST(Crc, KermitCheckValue) {
     const uint8_t data[] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
     EXPECT_EQ(chips_crc16_kermit_compute(data, sizeof(data), CHIPS_CRC16_KERMIT_INITIAL), 0x2189u);
 }
 
-TEST(ChipsCrc, IncrementalMatchesOneShot) {
+TEST(Crc, IncrementalMatchesOneShot) {
     const uint8_t data[] = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60};
     const uint16_t one_shot = chips_crc16_kermit_compute(data, sizeof(data), CHIPS_CRC16_KERMIT_INITIAL);
     uint16_t inc = chips_crc16_kermit_compute(data, 2, CHIPS_CRC16_KERMIT_INITIAL);
@@ -73,7 +73,7 @@ TEST(ChipsCrc, IncrementalMatchesOneShot) {
     EXPECT_EQ(one_shot, inc);
 }
 
-TEST_F(ChipsCodecTest, EncodeRejectsBadArguments) {
+TEST_F(CoreTest, EncodeRejectsBadArguments) {
     uint8_t out[CHIPS_WIRE_MAX];
     const uint8_t p[4] = {1, 2, 3, 4};
 
@@ -83,7 +83,7 @@ TEST_F(ChipsCodecTest, EncodeRejectsBadArguments) {
     EXPECT_EQ(chips_encode(0, CHIPS_DIR_REQUEST, uint8_t(CHIPS_CMD_MASK + 1u), p, 4, out), 0u);
 }
 
-TEST_F(ChipsCodecTest, EncodedFrameIsDelimitedAndStuffed) {
+TEST_F(CoreTest, EncodedFrameIsDelimitedAndStuffed) {
     const std::vector<uint8_t> payload{CHIPS_SYNC, 0x00, CHIPS_ESC, CHIPS_SYNC, CHIPS_ESC, 0x7F, CHIPS_SYNC};
     const auto wire = Encode(CHIPS_SYNC, CHIPS_DIR_REQUEST, k_cmd, payload);
 
@@ -105,7 +105,7 @@ TEST_F(ChipsCodecTest, EncodedFrameIsDelimitedAndStuffed) {
     }
 }
 
-TEST_F(ChipsCodecTest, RoundTripEmptyPayload) {
+TEST_F(CoreTest, RoundTripEmptyPayload) {
     const auto wire = Encode(0x42, CHIPS_DIR_REQUEST, k_cmd, {});
     ASSERT_FALSE(wire.empty());
 
@@ -118,7 +118,7 @@ TEST_F(ChipsCodecTest, RoundTripEmptyPayload) {
     EXPECT_EQ(m_frame.payload_len, 0u);
 }
 
-TEST_F(ChipsCodecTest, RoundTripResponseWithSpecialBytes) {
+TEST_F(CoreTest, RoundTripResponseWithSpecialBytes) {
     const std::vector<uint8_t> payload{0x01,          CHIPS_SYNC, CHIPS_ESC, CHIPS_SYNC_SUB,
                                        CHIPS_ESC_SUB, 0xFF,       CHIPS_ESC, CHIPS_ESC};
     const auto wire = Encode(CHIPS_ESC, CHIPS_DIR_RESPONSE, k_cmd, payload);
@@ -133,7 +133,7 @@ TEST_F(ChipsCodecTest, RoundTripResponseWithSpecialBytes) {
     EXPECT_EQ(FramePayload(), payload);
 }
 
-TEST_F(ChipsCodecTest, RoundTripMaxPayloadWorstCaseStuffing) {
+TEST_F(CoreTest, RoundTripMaxPayloadWorstCaseStuffing) {
     const std::vector<uint8_t> payload(CHIPS_MAX_PAYLOAD, CHIPS_SYNC);
     const auto wire = Encode(CHIPS_SYNC, CHIPS_DIR_REQUEST, CHIPS_SYNC, payload);
     ASSERT_GE(wire.size(), size_t(CHIPS_WIRE_MAX - 2));
@@ -145,7 +145,7 @@ TEST_F(ChipsCodecTest, RoundTripMaxPayloadWorstCaseStuffing) {
     EXPECT_EQ(FramePayload(), payload);
 }
 
-TEST_F(ChipsCodecTest, ByteByByteStreamingDecodes) {
+TEST_F(CoreTest, ByteByByteStreamingDecodes) {
     const std::vector<uint8_t> payload = {CHIPS_ESC, CHIPS_SYNC, 0x10, CHIPS_ESC};
     const auto wire = Encode(0x09, CHIPS_DIR_RESPONSE, k_cmd, payload);
 
@@ -154,7 +154,7 @@ TEST_F(ChipsCodecTest, ByteByByteStreamingDecodes) {
     EXPECT_EQ(FramePayload(), payload);
 }
 
-TEST_F(ChipsCodecTest, LeadingGarbageIsSkipped) {
+TEST_F(CoreTest, LeadingGarbageIsSkipped) {
     std::vector<uint8_t> stream = {0x11, 0x22, CHIPS_ESC, 0x33};
     const std::vector<uint8_t> payload = {0xAA, 0xBB};
     const auto wire = Encode(0x01, CHIPS_DIR_REQUEST, k_cmd, payload);
@@ -166,7 +166,7 @@ TEST_F(ChipsCodecTest, LeadingGarbageIsSkipped) {
     EXPECT_EQ(FramePayload(), payload);
 }
 
-TEST_F(ChipsCodecTest, BackToBackFramesAndIdleSyncs) {
+TEST_F(CoreTest, BackToBackFramesAndIdleSyncs) {
     const std::vector<uint8_t> p1 = {0x01, 0x02};
     const std::vector<uint8_t> p2 = {0x03, CHIPS_SYNC, 0x04};
     const auto w1 = Encode(1, CHIPS_DIR_REQUEST, k_cmd, p1);
@@ -282,7 +282,7 @@ std::vector<uint8_t> RandomNoise(Rng& rng) {
     return {};
 }
 
-TEST_F(ChipsCodecTest, RoundTripFramesInterleavedWithNoise) {
+TEST_F(CoreTest, RoundTripFramesInterleavedWithNoise) {
     constexpr uint32_t kSeeds[] = {1u, 2u, 3u, 0xC0FFEEu, 0xDEADBEEFu};
     constexpr int kFramesPerSeed = 3000;
 
@@ -340,7 +340,7 @@ TEST_F(ChipsCodecTest, RoundTripFramesInterleavedWithNoise) {
     }
 }
 
-TEST_F(ChipsCodecTest, DecodeRejectsBadArguments) {
+TEST_F(CoreTest, DecodeRejectsBadArguments) {
     const uint8_t b = CHIPS_SYNC;
     size_t consumed = 123;
 
@@ -352,7 +352,7 @@ TEST_F(ChipsCodecTest, DecodeRejectsBadArguments) {
     EXPECT_EQ(chips_decode(&m_dec, nullptr, 0, &consumed, &m_frame), CHIPS_DEC_NEED_MORE);
 }
 
-TEST_F(ChipsCodecTest, CorruptedByteGivesCrcError) {
+TEST_F(CoreTest, CorruptedByteGivesCrcError) {
     const std::vector<uint8_t> payload = {0x10, 0x20, 0x30, 0x40};
     auto wire = Encode(0x05, CHIPS_DIR_REQUEST, k_cmd, payload);
 
@@ -363,13 +363,13 @@ TEST_F(ChipsCodecTest, CorruptedByteGivesCrcError) {
     EXPECT_EQ(DecodeOnce(wire, &consumed), CHIPS_DEC_ERR_CRC);
 }
 
-TEST_F(ChipsCodecTest, TooShortFrame) {
+TEST_F(CoreTest, TooShortFrame) {
     const std::vector<uint8_t> wire = {CHIPS_SYNC, 0x01, 0x02, CHIPS_SYNC};
     size_t consumed = 0;
     EXPECT_EQ(DecodeOnce(wire, &consumed), CHIPS_DEC_ERR_TOO_SHORT);
 }
 
-TEST_F(ChipsCodecTest, InvalidEscapeSequence) {
+TEST_F(CoreTest, InvalidEscapeSequence) {
     uint8_t bad = 0x00;
     while (bad == CHIPS_SYNC || bad == CHIPS_ESC || bad == CHIPS_SYNC_SUB || bad == CHIPS_ESC_SUB) {
         ++bad;
@@ -379,13 +379,13 @@ TEST_F(ChipsCodecTest, InvalidEscapeSequence) {
     EXPECT_EQ(DecodeOnce(wire, &consumed), CHIPS_DEC_ERR_ESCAPE);
 }
 
-TEST_F(ChipsCodecTest, EscapeRightBeforeClosingSync) {
+TEST_F(CoreTest, EscapeRightBeforeClosingSync) {
     const std::vector<uint8_t> wire = {CHIPS_SYNC, 0x01, 0x02, 0x03, 0x04, CHIPS_ESC, CHIPS_SYNC};
     size_t consumed = 0;
     EXPECT_EQ(DecodeOnce(wire, &consumed), CHIPS_DEC_ERR_ESCAPE);
 }
 
-TEST_F(ChipsCodecTest, OverlongFrameGivesTooLong) {
+TEST_F(CoreTest, OverlongFrameGivesTooLong) {
     uint8_t filler = 0x00;
     while (filler == CHIPS_SYNC || filler == CHIPS_ESC) {
         ++filler;
@@ -413,18 +413,18 @@ std::vector<uint8_t> FullFrameThenEscapePair() {
     return wire;
 }
 
-TEST_F(ChipsCodecTest, OverlongViaEscapedByteGivesTooLong) {
+TEST_F(CoreTest, OverlongViaEscapedByteGivesTooLong) {
     const auto wire = FullFrameThenEscapePair();
     size_t consumed = 0;
     EXPECT_EQ(DecodeOnce(wire, &consumed), CHIPS_DEC_ERR_TOO_LONG);
 }
 
-TEST_F(ChipsCodecTest, OverlongViaEscapedByteSplitAcrossCalls) {
+TEST_F(CoreTest, OverlongViaEscapedByteSplitAcrossCalls) {
     const auto wire = FullFrameThenEscapePair();
     EXPECT_EQ(DecodeByteByByte(wire), CHIPS_DEC_ERR_TOO_LONG);
 }
 
-TEST_F(ChipsCodecTest, DecoderRecoversAfterError) {
+TEST_F(CoreTest, DecoderRecoversAfterError) {
     const std::vector<uint8_t> payload = {0xDE, 0xAD};
     const auto good = Encode(0x33, CHIPS_DIR_REQUEST, k_cmd, payload);
 
@@ -437,7 +437,7 @@ TEST_F(ChipsCodecTest, DecoderRecoversAfterError) {
     EXPECT_EQ(FramePayload(), payload);
 }
 
-TEST_F(ChipsCodecTest, ResetReturnsDiscardedLength) {
+TEST_F(CoreTest, ResetReturnsDiscardedLength) {
     const std::vector<uint8_t> partial = {CHIPS_SYNC, 0x01, 0x02, 0x03};
     size_t consumed = 0;
     ASSERT_EQ(DecodeOnce(partial, &consumed), CHIPS_DEC_NEED_MORE);
@@ -446,7 +446,7 @@ TEST_F(ChipsCodecTest, ResetReturnsDiscardedLength) {
     EXPECT_EQ(chips_decoder_reset(nullptr), 0u);
 }
 
-TEST_F(ChipsCodecTest, InitWithNullDecoderIsNoOp) {
+TEST_F(CoreTest, InitWithNullDecoderIsNoOp) {
     chips_decoder_init(nullptr, m_payload_buf);
     SUCCEED();
 }

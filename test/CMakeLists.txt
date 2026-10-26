@@ -12,22 +12,30 @@ endif()
 
 include(GoogleTest)
 
-add_executable(
-    chips_core_test
-    "${CMAKE_CURRENT_LIST_DIR}/core_test.cpp"
-)
-
+add_library(chips_test_support INTERFACE)
+target_include_directories(chips_test_support INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/support")
+target_compile_features(chips_test_support INTERFACE cxx_std_14)
 target_link_libraries(
-    chips_core_test
-    PRIVATE
-        chips_core
+    chips_test_support
+    INTERFACE
         GTest::gtest_main
+        chips_sanitizers
 )
 
-target_compile_features(
-    chips_core_test
-    PRIVATE
-        cxx_std_14
-)
+function(chips_add_test module)
+    set(target chips_${module}_test)
+    add_executable(${target} "${CMAKE_CURRENT_SOURCE_DIR}/${module}_test.cpp")
+    target_link_libraries(
+        ${target}
+        PRIVATE
+            chips_core
+            chips_master
+            chips_slave
+            chips_test_support
+    )
+    gtest_discover_tests(${target})
+endfunction()
 
-gtest_discover_tests(chips_core_test)
+chips_add_test(core)
+chips_add_test(master)
+chips_add_test(slave)

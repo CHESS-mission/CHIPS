@@ -128,7 +128,7 @@ uint16_t chips_crc16_kermit_compute(const uint8_t* data, size_t length, uint16_t
 /* Encoder                                                                   */
 /* ------------------------------------------------------------------------- */
 
-/** @brief Packet direction. */
+/** @brief Frame direction. */
 typedef enum {
     CHIPS_DIR_REQUEST, /**< Request. */
     CHIPS_DIR_RESPONSE /**< Response to a previous request. */
@@ -182,6 +182,7 @@ typedef struct {
     uint8_t cmd;                 /**< Command identifier. */
     const uint8_t* payload;      /**< Payload data. */
     size_t payload_len;          /**< Payload length in bytes. */
+    uint16_t crc;                /**< Kermit 16 crc */
 } chips_frame_t;
 
 /** @brief Decoder receive state. @internal */
@@ -225,11 +226,35 @@ void chips_decoder_init(chips_decoder_t* dec, uint8_t payload_buf[CHIPS_MAX_PAYL
 size_t chips_decoder_reset(chips_decoder_t* dec);
 
 /**
+ * @brief Point the decoder at a different payload buffer, keeping framing state.
+ *
+ * Unlike chips_decoder_init(), this does not return to the hunt state, so a
+ * frame that starts on the delimiter which closed the previous one is not
+ * lost. Intended for rotating buffers: once chips_decode() has returned
+ * #CHIPS_DEC_FRAME, the frame's payload can be kept in the old buffer while
+ * decoding continues into the new one.
+ *
+ * Precondition: no payload byte of the current frame is stored yet (always
+ * true right after chips_decode() returned #CHIPS_DEC_FRAME, or after init or
+ * reset).
+ *
+ * @param dec         Decoder.
+ * @param payload_buf New payload storage of #CHIPS_MAX_PAYLOAD bytes. Must
+ *                    outlive its use by the decoder.
+ */
+void chips_decoder_set_buffer(chips_decoder_t* dec, uint8_t payload_buf[CHIPS_MAX_PAYLOAD]);
+
+/**
  * @brief Feed bytes from a CHIPS stream into the decoder.
  *
  * Input may contain partial frames, several frames, or arbitrary
  * fragmentation. Decoding stops once a frame or an error is reported;
  * call again with the remaining input (@p in + @p *consumed) to continue.
+ *
+ * Progress guarantee: if @p in_len > 0 and the return value is not
+ * #CHIPS_DEC_ERR_ARG, then 1 <= @p *consumed <= @p in_len. Every such
+ * call consumes at least one byte, so a caller loop that feeds the
+ * remaining input back in terminates after at most @p in_len calls.
  *
  * @param dec      Decoder instance.
  * @param in       Input bytes.
