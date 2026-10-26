@@ -48,27 +48,35 @@ typedef enum {
     CHIPS_SUBMIT_INVALID_ARG /**< Bad command, payload, response buffer or timeout. */
 } chips_submit_status_t;
 
-/** @brief How a transaction ended. */
+/**
+ * @brief How a transaction ended.
+ *
+ * Only a response frame whose sequence and command both match the request
+ * ends a transaction early. Every other decoded frame is ignored and reported
+ * through an event bit (#CHIPS_EV_RX_REQUEST, #CHIPS_EV_RX_STALE,
+ * #CHIPS_EV_RX_CMD_MISMATCH), and the master keeps listening until the
+ * deadline.
+ */
 typedef enum {
-    CHIPS_OUTCOME_PENDING = 0,        /**< Not finished (or none submitted). */
-    CHIPS_OUTCOME_OK,                 /**< Matching response received. */
-    CHIPS_OUTCOME_TIMEOUT,            /**< Deadline passed after at least one full send. */
-    CHIPS_OUTCOME_SEND_FAILED,        /**< Deadline passed and no copy was ever fully sent. */
-    CHIPS_OUTCOME_UNEXPECTED_REQUEST, /**< Received a frame flagged as a request. */
-    CHIPS_OUTCOME_CMD_MISMATCH,       /**< Response sequence matched but command did not. */
-    CHIPS_OUTCOME_CANCELLED           /**< chips_master_cancel() was called. */
+    CHIPS_OUTCOME_PENDING = 0, /**< Not finished (or none submitted). */
+    CHIPS_OUTCOME_OK,          /**< Response with matching sequence and command received. */
+    CHIPS_OUTCOME_TIMEOUT,     /**< Deadline passed after at least one full send. */
+    CHIPS_OUTCOME_SEND_FAILED, /**< Deadline passed and no copy was ever fully sent. */
+    CHIPS_OUTCOME_CANCELLED    /**< chips_master_cancel() was called. */
 } chips_outcome_t;
 
 /** @brief Event bits returned by chips_master_step(). */
 enum {
     CHIPS_EV_NONE = 0u,
-    CHIPS_EV_DONE = 1u << 0,         /**< Transaction finished; see chips_master_result(). */
-    CHIPS_EV_TX_FRAME = 1u << 1,     /**< A full copy of the request reached the port. */
-    CHIPS_EV_TX_ERROR = 1u << 2,     /**< Port write failed; copy abandoned until next resend. */
-    CHIPS_EV_RX_ERROR = 1u << 3,     /**< Port read failed; partial frame discarded. */
-    CHIPS_EV_RX_BAD_FRAME = 1u << 4, /**< Decoder rejected a frame (escape, length, CRC). */
-    CHIPS_EV_RX_STALE = 1u << 5,     /**< Response to an earlier request ignored. */
-    CHIPS_EV_RX_DROPPED = 1u << 6    /**< Bytes read but not decoded (idle or after completion). */
+    CHIPS_EV_DONE = 1u << 0,           /**< Transaction finished; see chips_master_result(). */
+    CHIPS_EV_TX_FRAME = 1u << 1,       /**< A full copy of the request reached the port. */
+    CHIPS_EV_TX_ERROR = 1u << 2,       /**< Port write failed; copy abandoned until next resend. */
+    CHIPS_EV_RX_ERROR = 1u << 3,       /**< Port read failed; partial frame discarded. */
+    CHIPS_EV_RX_BAD_FRAME = 1u << 4,   /**< Decoder rejected a frame (escape, length, CRC). */
+    CHIPS_EV_RX_STALE = 1u << 5,       /**< Response with another sequence (or before first send) ignored. */
+    CHIPS_EV_RX_DROPPED = 1u << 6,     /**< Bytes read but not decoded (idle or after completion). */
+    CHIPS_EV_RX_REQUEST = 1u << 7,     /**< Frame flagged as a request ignored (e.g. line echo). */
+    CHIPS_EV_RX_CMD_MISMATCH = 1u << 8 /**< Response with matching sequence but other command ignored. */
 };
 
 /** @brief Outcome of the last transaction. */
@@ -171,9 +179,10 @@ void chips_master_init(chips_master_t* m, const chips_port_t* port, const chips_
  *  - The master writes to it only inside chips_master_step(). Nothing is
  *    written by this call, by chips_master_cancel(), or after the transaction
  *    has ended; the next transaction uses only its own buffer.
- *  - It also holds partially received frames. Its contents are therefore
- *    meaningful only after the transaction ended with #CHIPS_OUTCOME_OK (the
- *    first payload_len bytes); after any other outcome they are unspecified.
+ *  - It also holds partially received and ignored frames. Its contents are
+ *    therefore meaningful only after the transaction ended with
+ *    #CHIPS_OUTCOME_OK (the first payload_len bytes); after any other outcome
+ *    they are unspecified.
  *  - Once the transaction has ended, the buffer is the application's again.
  *
  * @param m            Instance.

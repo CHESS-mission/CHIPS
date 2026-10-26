@@ -519,35 +519,96 @@ TEST_F(MasterTest, LateResponseToCancelledTransactionIsStale) {
     EXPECT_EQ(CHIPS_MASTER_WAITING, State());
 }
 
-TEST_F(MasterTest, CmdMismatchFinishesTransaction) {
+TEST_F(MasterTest, CmdMismatchIsIgnoredAndTransactionContinues) {
     Submit(0x01);
     Step();
-    m_fake.now = 77;
     m_fake.Feed(Resp(Seq(), 0x02, {1}));
 
+    const uint32_t ev = Step();
+    EXPECT_TRUE(Has(ev, CHIPS_EV_RX_CMD_MISMATCH));
+    EXPECT_FALSE(Has(ev, CHIPS_EV_RX_STALE));
+    EXPECT_FALSE(Has(ev, CHIPS_EV_DONE));
+    EXPECT_EQ(CHIPS_MASTER_WAITING, State());
+    EXPECT_EQ(CHIPS_OUTCOME_PENDING, Result().outcome);
+
+    m_fake.Feed(Response({2}));
     EXPECT_TRUE(Has(Step(), CHIPS_EV_DONE));
-    EXPECT_EQ(CHIPS_OUTCOME_CMD_MISMATCH, Result().outcome);
-    EXPECT_EQ(77u, Result().latency_us);
+    EXPECT_EQ(CHIPS_OUTCOME_OK, Result().outcome);
+    EXPECT_EQ((Bytes{2}), ResultPayload());
+}
+
+TEST_F(MasterTest, CmdMismatchOnlyEndsInTimeout) {
+    Submit(0x01);
+    Step();
+    m_fake.Feed(Resp(Seq(), 0x02, {1}));
+    EXPECT_TRUE(Has(Step(), CHIPS_EV_RX_CMD_MISMATCH));
+
+    m_fake.now = K_TIMEOUT_US;
+    EXPECT_TRUE(Has(Step(), CHIPS_EV_DONE));
+    EXPECT_EQ(CHIPS_OUTCOME_TIMEOUT, Result().outcome);
     EXPECT_EQ(nullptr, Result().payload);
     EXPECT_EQ(0u, Result().payload_len);
 }
 
-TEST_F(MasterTest, RequestFrameFinishesAsUnexpectedRequest) {
+TEST_F(MasterTest, EchoOfOwnRequestIsIgnored) {
+    Submit(0x01, {1, 2, 3});
+    Step();
+    m_fake.Feed(m_fake.tx);
+
+    const uint32_t ev = Step();
+    EXPECT_TRUE(Has(ev, CHIPS_EV_RX_REQUEST));
+    EXPECT_FALSE(Has(ev, CHIPS_EV_DONE));
+    EXPECT_FALSE(Has(ev, CHIPS_EV_RX_STALE));
+    EXPECT_EQ(CHIPS_MASTER_WAITING, State());
+    EXPECT_EQ(CHIPS_OUTCOME_PENDING, Result().outcome);
+
+    m_fake.Feed(Response({4}));
+    EXPECT_TRUE(Has(Step(), CHIPS_EV_DONE));
+    EXPECT_EQ(CHIPS_OUTCOME_OK, Result().outcome);
+    EXPECT_EQ((Bytes{4}), ResultPayload());
+}
+
+TEST_F(MasterTest, EchoThenResponseInOneRead) {
     Submit(0x01);
     Step();
     m_fake.Feed(Request());
+    m_fake.Feed(Response({7}));
 
-    EXPECT_TRUE(Has(Step(), CHIPS_EV_DONE));
-    EXPECT_EQ(CHIPS_OUTCOME_UNEXPECTED_REQUEST, Result().outcome);
+    const uint32_t ev = Step();
+    EXPECT_TRUE(Has(ev, CHIPS_EV_RX_REQUEST));
+    EXPECT_TRUE(Has(ev, CHIPS_EV_DONE));
+    EXPECT_EQ(CHIPS_OUTCOME_OK, Result().outcome);
+    EXPECT_EQ((Bytes{7}), ResultPayload());
 }
 
-TEST_F(MasterTest, UnexpectedRequestTakesPrecedenceOverStaleSeq) {
+TEST_F(MasterTest, RequestWithOtherSeqIsReportedAsRequestNotStale) {
     Submit(0x01);
     Step();
     m_fake.Feed(Req(static_cast<uint8_t>(Seq() + 1), Cmd()));
 
+    const uint32_t ev = Step();
+    EXPECT_TRUE(Has(ev, CHIPS_EV_RX_REQUEST));
+    EXPECT_FALSE(Has(ev, CHIPS_EV_RX_STALE));
+    EXPECT_FALSE(Has(ev, CHIPS_EV_DONE));
+    EXPECT_EQ(CHIPS_MASTER_WAITING, State());
+}
+
+TEST_F(MasterTest, EchoOfEveryResendStillTimesOut) {
+    Submit(0x01);
+    Step();
+    for (uint32_t t = K_RESEND_US; t < K_TIMEOUT_US; t += K_RESEND_US) {
+        m_fake.Feed(Request());
+        m_fake.now = t;
+        const uint32_t ev = Step();
+        EXPECT_TRUE(Has(ev, CHIPS_EV_RX_REQUEST)) << "t=" << t;
+        EXPECT_TRUE(Has(ev, CHIPS_EV_TX_FRAME)) << "t=" << t;
+        EXPECT_FALSE(Has(ev, CHIPS_EV_DONE)) << "t=" << t;
+    }
+
+    m_fake.now = K_TIMEOUT_US;
     EXPECT_TRUE(Has(Step(), CHIPS_EV_DONE));
-    EXPECT_EQ(CHIPS_OUTCOME_UNEXPECTED_REQUEST, Result().outcome);
+    EXPECT_EQ(CHIPS_OUTCOME_TIMEOUT, Result().outcome);
+    EXPECT_EQ(K_TIMEOUT_US / K_RESEND_US - 1, Count(CHIPS_EV_RX_REQUEST));
 }
 
 TEST_F(MasterTest, BytesAfterCompletionInSameReadAreDropped) {

@@ -45,13 +45,13 @@ static bool read_chunk(chips_master_t* m, size_t* n) {
 
 static uint32_t on_frame(chips_master_t* m, uint32_t now) {
     if (m->frame.direction != CHIPS_DIR_RESPONSE) {
-        return finish(m, CHIPS_OUTCOME_UNEXPECTED_REQUEST, elapsed_us(now, m->t_start));
+        return CHIPS_EV_RX_REQUEST;
     }
     if (!m->sent_ok || m->frame.seq != m->seq) {
         return CHIPS_EV_RX_STALE;
     }
     if (m->frame.cmd != m->cmd) {
-        return finish(m, CHIPS_OUTCOME_CMD_MISMATCH, elapsed_us(now, m->t_start));
+        return CHIPS_EV_RX_CMD_MISMATCH;
     }
     return finish(m, CHIPS_OUTCOME_OK, elapsed_us(now, m->t_start));
 }
