@@ -18,9 +18,6 @@
 extern "C" {
 #endif
 
-/** Longest duration accepted anywhere in the API, in µs (about 35 minutes). */
-#define CHIPS_TIME_MAX_US (0x7FFFFFFFu)
-
 /** @brief Result of a port read or write. */
 typedef enum {
     CHIPS_IO_OK = 0, /**< Call succeeded (possibly with 0 bytes moved). */

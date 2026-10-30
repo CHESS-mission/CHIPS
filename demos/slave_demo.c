@@ -121,8 +121,6 @@ int main(void) {
     static sim_t sim;
     static chips_slave_t slave;
 
-    chips_crc16_kermit_init();
-
     script(&sim, 1, CMD_PING, "");
     script(&sim, 2, CMD_ECHO, "hello");
     script(&sim, 2, CMD_ECHO, "hello");
@@ -136,8 +134,7 @@ int main(void) {
         .now_us = sim_now_us,
         .ctx = &sim,
     };
-    const chips_slave_config_t cfg = {.cache_window_us = 500000u};
-    chips_slave_init(&slave, &port, &cfg);
+    chips_slave_init(&slave, &port);
 
     tally_t t = {0};
 

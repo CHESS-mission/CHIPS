@@ -39,10 +39,4 @@
 #define CHIPS_UNROLL_FULL
 #endif
 
-#ifdef __cplusplus
-#define CHIPS_CAST(T, val) (static_cast<T>(val))
-#else
-#define CHIPS_CAST(T, val) ((T)(val))
-#endif
-
 #endif /* CHIPS_COMPILER_H */

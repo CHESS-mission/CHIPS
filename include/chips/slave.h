@@ -18,27 +18,6 @@ extern "C" {
 #endif
 
 /* ------------------------------------------------------------------------- */
-/* Configuration                                                             */
-/* ------------------------------------------------------------------------- */
-
-/**
- * @brief Maximum bytes read from the port per step.
- */
-#ifndef CHIPS_SLAVE_RX_CHUNK
-#define CHIPS_SLAVE_RX_CHUNK (256u)
-#endif
-
-/** @brief Static configuration. */
-typedef struct {
-    /**
-     * How long a cached response may be replayed, in µs, measured from the
-     * chips_slave_respond() call. 1..#CHIPS_TIME_MAX_US. Should be at least
-     * the master's longest transaction timeout.
-     */
-    uint32_t cache_window_us;
-} chips_slave_config_t;
-
-/* ------------------------------------------------------------------------- */
 /* Results and events                                                        */
 /* ------------------------------------------------------------------------- */
 
@@ -55,7 +34,8 @@ enum {
     CHIPS_SLAVE_EV_REQUEST = 1u << 0,      /**< New request pending; see chips_slave_request(). */
     CHIPS_SLAVE_EV_TX_FRAME = 1u << 1,     /**< A full copy of a response reached the port. */
     CHIPS_SLAVE_EV_RETRANSMIT = 1u << 2,   /**< Duplicate request answered from the cache. */
-    CHIPS_SLAVE_EV_TX_ERROR = 1u << 3,     /**< Port write failed; that copy is abandoned. */
+    CHIPS_SLAVE_EV_TX_ERROR = 1u << 3,     /**< Port write failed; that copy is abandoned. Part of it may
+                                                already be on the line. */
     CHIPS_SLAVE_EV_RX_ERROR = 1u << 4,     /**< Port read failed; partial frame discarded. */
     CHIPS_SLAVE_EV_RX_BAD_FRAME = 1u << 5, /**< Decoder rejected a frame (escape, length, CRC). */
     CHIPS_SLAVE_EV_RX_IGNORED = 1u << 6    /**< Valid frame not acted on (busy, pending copy, response). */
@@ -103,7 +83,6 @@ typedef struct {
 typedef struct {
     /* Binding */
     chips_port_t port;
-    uint32_t cache_window_us;
 
     /* State */
     chips_slave_state_t state;
@@ -142,15 +121,15 @@ typedef struct {
  *
  * @param s    Instance.
  * @param port Port; copied. All three functions must be non-NULL.
- * @param cfg  Configuration.
  */
-void chips_slave_init(chips_slave_t* s, const chips_port_t* port, const chips_slave_config_t* cfg);
+void chips_slave_init(chips_slave_t* s, const chips_port_t* port);
 
 /**
  * @brief Advance the state machine by one tick.
  *
- * Order within a step: receive and decode (delivering at most one new
- * request, answering duplicates), then transmit.
+ * Order within a step: expire the cache if its window has elapsed, then
+ * receive and decode (delivering at most one new request, answering
+ * duplicates), then transmit.
  *
  * @return Bitwise OR of CHIPS_SLAVE_EV_* for everything that happened in this step.
  */
@@ -167,6 +146,11 @@ const chips_slave_request_t* chips_slave_request(const chips_slave_t* s);
  * Encodes the response, replaces the cache with it (cutting short any copy
  * of the previous response still being written), and returns to LISTENING.
  * The first copy is written by the next step.
+ *
+ * A copy cut short is not guaranteed to be discarded by the master: if only
+ * its closing SYNC was missing, the opening SYNC of this response completes
+ * it. The master then sees a response for an earlier sequence and ignores it
+ * as stale.
  *
  * @param s           Instance.
  * @param payload     Response payload; copied. May be NULL if @p payload_len
@@ -187,7 +171,13 @@ chips_respond_status_t chips_slave_abandon(chips_slave_t* s);
  * @brief Drop the response cache, so no duplicate is answered from it.
  *
  * Use after a mode change or reset that makes the cached answer wrong.
- * A copy being written is cut short. Does not affect a pending request.
+ * Does not affect a pending request.
+ *
+ * A copy being written is cut short, but this does not guarantee the master
+ * never receives it. Bytes already written stay on the line. If only the
+ * closing SYNC was missing, the opening SYNC of the next response completes
+ * the copy, and a master still waiting for that request accepts it as its
+ * answer.
  */
 void chips_slave_invalidate_cache(chips_slave_t* s);
 

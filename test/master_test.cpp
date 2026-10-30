@@ -17,18 +17,14 @@ namespace {
 
 using namespace chips_test;
 
-constexpr uint32_t K_RESEND_US = 1000;
-constexpr uint32_t K_TIMEOUT_US = 10000;
 constexpr uint8_t K_SENTINEL = 0xE5;
 
 class MasterTest : public ::testing::Test {
   protected:
     void SetUp() override {
         m_port = m_fake.Port();
-        m_cfg = chips_master_config_t{};
-        m_cfg.resend_period_us = K_RESEND_US;
         FillBuffer(K_SENTINEL);
-        chips_master_init(&m_master, &m_port, &m_cfg);
+        chips_master_init(&m_master, &m_port);
     }
 
     uint32_t Step() {
@@ -43,13 +39,13 @@ class MasterTest : public ::testing::Test {
 
     unsigned long Count(uint32_t flag) const { return m_tally.Count(flag); }
 
-    void Submit(uint8_t cmd, const Bytes& payload = {}, uint32_t timeout = K_TIMEOUT_US, uint8_t* buf = nullptr) {
+    void Submit(uint8_t cmd, const Bytes& payload = {}, uint8_t* buf = nullptr) {
         ASSERT_EQ(CHIPS_SUBMIT_OK, chips_master_submit(&m_master, cmd, payload.empty() ? nullptr : payload.data(),
-                                                       payload.size(), timeout, buf ? buf : m_rbuf));
+                                                       payload.size(), buf ? buf : m_rbuf));
     }
 
     void Transact(uint8_t cmd, const Bytes& payload, uint8_t* buf = nullptr) {
-        Submit(cmd, {}, K_TIMEOUT_US, buf);
+        Submit(cmd, {}, buf);
         Step();
         m_fake.Feed(Response(payload));
         ASSERT_TRUE(Has(StepUntil(CHIPS_EV_DONE), CHIPS_EV_DONE));
@@ -77,7 +73,6 @@ class MasterTest : public ::testing::Test {
 
     FakePort m_fake;
     chips_port_t m_port{};
-    chips_master_config_t m_cfg{};
     uint8_t m_rbuf[CHIPS_MAX_PAYLOAD];
     chips_master_t m_master;
     EventTally m_tally;
@@ -130,7 +125,7 @@ TEST_F(MasterTest, SubmitPayloadMayAliasResponseBuffer) {
     const Bytes first = Pattern(200);
     Transact(0x01, first);
 
-    ASSERT_EQ(CHIPS_SUBMIT_OK, chips_master_submit(&m_master, 0x02, m_rbuf, first.size(), K_TIMEOUT_US, m_rbuf));
+    ASSERT_EQ(CHIPS_SUBMIT_OK, chips_master_submit(&m_master, 0x02, m_rbuf, first.size(), m_rbuf));
     m_fake.tx.clear();
     m_fake.Feed(Response(Bytes(CHIPS_MAX_PAYLOAD, 0x33)));
     EXPECT_TRUE(Has(StepUntil(CHIPS_EV_DONE), CHIPS_EV_DONE));
@@ -142,7 +137,7 @@ TEST_F(MasterTest, SubmitPayloadMayAliasResponseBuffer) {
 TEST_F(MasterTest, NonOkOutcomeHasNoPayload) {
     Submit(0x01);
     Step();
-    m_fake.now = K_TIMEOUT_US;
+    m_fake.now = CHIPS_TIMEOUT_US;
     EXPECT_TRUE(Has(Step(), CHIPS_EV_DONE));
     EXPECT_EQ(CHIPS_OUTCOME_TIMEOUT, Result().outcome);
     EXPECT_EQ(nullptr, Result().payload);
@@ -167,7 +162,7 @@ TEST_F(MasterTest, EachSubmitWritesOnlyItsOwnBuffer) {
 
 TEST_F(MasterTest, CancelReleasesTheBufferImmediately) {
     uint8_t other[CHIPS_MAX_PAYLOAD];
-    Submit(0x01, {}, K_TIMEOUT_US, other);
+    Submit(0x01, {}, other);
     Step();
     const uint8_t old_seq = Seq();
     ASSERT_TRUE(chips_master_cancel(&m_master));
@@ -186,10 +181,10 @@ TEST_F(MasterTest, CancelReleasesTheBufferImmediately) {
 
 TEST_F(MasterTest, TimedOutBufferIsNotWrittenAfterwards) {
     uint8_t other[CHIPS_MAX_PAYLOAD];
-    Submit(0x01, {}, K_TIMEOUT_US, other);
+    Submit(0x01, {}, other);
     Step();
     const uint8_t seq = Seq();
-    m_fake.now = K_TIMEOUT_US;
+    m_fake.now = CHIPS_TIMEOUT_US;
     ASSERT_TRUE(Has(Step(), CHIPS_EV_DONE));
     std::memset(other, 0x5C, sizeof(other));
 
@@ -200,9 +195,9 @@ TEST_F(MasterTest, TimedOutBufferIsNotWrittenAfterwards) {
 
 TEST_F(MasterTest, ReinitReleasesTheBuffer) {
     uint8_t other[CHIPS_MAX_PAYLOAD];
-    Submit(0x01, {}, K_TIMEOUT_US, other);
+    Submit(0x01, {}, other);
     Step();
-    chips_master_init(&m_master, &m_port, &m_cfg);
+    chips_master_init(&m_master, &m_port);
     EXPECT_EQ(CHIPS_MASTER_IDLE, State());
     std::memset(other, 0x5C, sizeof(other));
 
@@ -227,10 +222,10 @@ TEST_F(MasterTest, SubmitDoesNotTransmitUntilStepped) {
 
 TEST_F(MasterTest, SubmitWhileArmedOrWaitingIsBusy) {
     Submit(0x01);
-    EXPECT_EQ(CHIPS_SUBMIT_BUSY, chips_master_submit(&m_master, 0x02, nullptr, 0, K_TIMEOUT_US, m_rbuf));
+    EXPECT_EQ(CHIPS_SUBMIT_BUSY, chips_master_submit(&m_master, 0x02, nullptr, 0, m_rbuf));
     Step();
     ASSERT_EQ(CHIPS_MASTER_WAITING, State());
-    EXPECT_EQ(CHIPS_SUBMIT_BUSY, chips_master_submit(&m_master, 0x02, nullptr, 0, K_TIMEOUT_US, m_rbuf));
+    EXPECT_EQ(CHIPS_SUBMIT_BUSY, chips_master_submit(&m_master, 0x02, nullptr, 0, m_rbuf));
 
     EXPECT_EQ(0x01u, Result().cmd);
     EXPECT_EQ(1u, Result().seq);
@@ -241,18 +236,12 @@ TEST_F(MasterTest, SubmitRejectsInvalidArguments) {
     const Bytes too_big(CHIPS_MAX_PAYLOAD + 1, 0xAB);
 
     if (CHIPS_CMD_MASK < 0xFF) {
-        EXPECT_EQ(CHIPS_SUBMIT_INVALID_ARG, chips_master_submit(&m_master, static_cast<uint8_t>(CHIPS_CMD_MASK + 1),
-                                                                &one, 1, K_TIMEOUT_US, m_rbuf));
-    }
-    EXPECT_EQ(CHIPS_SUBMIT_INVALID_ARG,
-              chips_master_submit(&m_master, 0x01, too_big.data(), too_big.size(), K_TIMEOUT_US, m_rbuf));
-    EXPECT_EQ(CHIPS_SUBMIT_INVALID_ARG, chips_master_submit(&m_master, 0x01, nullptr, 1, K_TIMEOUT_US, m_rbuf));
-    EXPECT_EQ(CHIPS_SUBMIT_INVALID_ARG, chips_master_submit(&m_master, 0x01, &one, 1, 0, m_rbuf));
-    if (CHIPS_TIME_MAX_US < std::numeric_limits<uint32_t>::max()) {
         EXPECT_EQ(CHIPS_SUBMIT_INVALID_ARG,
-                  chips_master_submit(&m_master, 0x01, &one, 1, CHIPS_TIME_MAX_US + 1, m_rbuf));
+                  chips_master_submit(&m_master, static_cast<uint8_t>(CHIPS_CMD_MASK + 1), &one, 1, m_rbuf));
     }
-    EXPECT_EQ(CHIPS_SUBMIT_INVALID_ARG, chips_master_submit(&m_master, 0x01, &one, 1, K_TIMEOUT_US, nullptr));
+    EXPECT_EQ(CHIPS_SUBMIT_INVALID_ARG, chips_master_submit(&m_master, 0x01, too_big.data(), too_big.size(), m_rbuf));
+    EXPECT_EQ(CHIPS_SUBMIT_INVALID_ARG, chips_master_submit(&m_master, 0x01, nullptr, 1, m_rbuf));
+    EXPECT_EQ(CHIPS_SUBMIT_INVALID_ARG, chips_master_submit(&m_master, 0x01, &one, 1, nullptr));
 
     EXPECT_EQ(CHIPS_MASTER_IDLE, State());
     EXPECT_EQ(CHIPS_OUTCOME_PENDING, Result().outcome);
@@ -262,11 +251,11 @@ TEST_F(MasterTest, SubmitRejectsInvalidArguments) {
 
 TEST_F(MasterTest, SubmitAcceptsBoundaryArguments) {
     const Bytes max_payload(CHIPS_MAX_PAYLOAD, 0x5A);
-    EXPECT_EQ(CHIPS_SUBMIT_OK, chips_master_submit(&m_master, CHIPS_CMD_MASK, max_payload.data(), max_payload.size(),
-                                                   CHIPS_TIME_MAX_US, m_rbuf));
+    EXPECT_EQ(CHIPS_SUBMIT_OK,
+              chips_master_submit(&m_master, CHIPS_CMD_MASK, max_payload.data(), max_payload.size(), m_rbuf));
     EXPECT_TRUE(chips_master_cancel(&m_master));
 
-    EXPECT_EQ(CHIPS_SUBMIT_OK, chips_master_submit(&m_master, 0x00, nullptr, 0, 1, m_rbuf));
+    EXPECT_EQ(CHIPS_SUBMIT_OK, chips_master_submit(&m_master, 0x00, nullptr, 0, m_rbuf));
 }
 
 TEST_F(MasterTest, SeqIncrementsPerSubmitAndWrapsAt256) {
@@ -319,7 +308,7 @@ TEST_F(MasterTest, NoResendBeforePeriodElapses) {
     Step();
     const int writes = m_fake.write_calls;
 
-    m_fake.now = K_RESEND_US - 1;
+    m_fake.now = CHIPS_RESEND_PERIOD_US - 1;
     EXPECT_FALSE(Has(Step(), CHIPS_EV_TX_FRAME));
     EXPECT_EQ(writes, m_fake.write_calls);
 }
@@ -329,13 +318,13 @@ TEST_F(MasterTest, ResendsEveryPeriodMeasuredFromLastSend) {
     Step();
     const Bytes frame = m_fake.tx;
 
-    m_fake.now = K_RESEND_US;
+    m_fake.now = CHIPS_RESEND_PERIOD_US;
     EXPECT_TRUE(Has(Step(), CHIPS_EV_TX_FRAME));
 
-    m_fake.now = 2 * K_RESEND_US - 1;
+    m_fake.now = 2 * CHIPS_RESEND_PERIOD_US - 1;
     EXPECT_FALSE(Has(Step(), CHIPS_EV_TX_FRAME));
 
-    m_fake.now = 2 * K_RESEND_US;
+    m_fake.now = 2 * CHIPS_RESEND_PERIOD_US;
     EXPECT_TRUE(Has(Step(), CHIPS_EV_TX_FRAME));
     EXPECT_EQ(3u, Count(CHIPS_EV_TX_FRAME));
 
@@ -366,7 +355,8 @@ TEST_F(MasterTest, InFlightFrameIsNotRestartedByResendTimer) {
     ASSERT_GT(expected.size(), 6u);
 
     Step();
-    m_fake.now = 3 * K_RESEND_US;
+    m_fake.now = 2 * CHIPS_RESEND_PERIOD_US;
+    ASSERT_GT(CHIPS_TIMEOUT_US, m_fake.now);
     Step();
 
     EXPECT_EQ(Bytes(expected.begin(), expected.begin() + 6), m_fake.tx);
@@ -382,11 +372,11 @@ TEST_F(MasterTest, WriteErrorReportsTxErrorAndRetriesAfterPeriod) {
 
     m_fake.fail_write = false;
     const int writes = m_fake.write_calls;
-    m_fake.now = K_RESEND_US - 1;
+    m_fake.now = CHIPS_RESEND_PERIOD_US - 1;
     Step();
     EXPECT_EQ(writes, m_fake.write_calls);
 
-    m_fake.now = K_RESEND_US;
+    m_fake.now = CHIPS_RESEND_PERIOD_US;
     EXPECT_TRUE(Has(Step(), CHIPS_EV_TX_FRAME));
     EXPECT_EQ(1u, Count(CHIPS_EV_TX_FRAME));
     EXPECT_EQ(Request(), m_fake.tx);
@@ -404,7 +394,7 @@ TEST_F(MasterTest, WriteErrorMidFrameRestartsWholeFrameOnRetry) {
     m_fake.fail_write = false;
     m_fake.max_write = std::numeric_limits<size_t>::max();
     m_fake.tx.clear();
-    m_fake.now = K_RESEND_US;
+    m_fake.now = CHIPS_RESEND_PERIOD_US;
     EXPECT_TRUE(Has(Step(), CHIPS_EV_TX_FRAME));
     EXPECT_EQ(expected, m_fake.tx);
 }
@@ -543,7 +533,7 @@ TEST_F(MasterTest, CmdMismatchOnlyEndsInTimeout) {
     m_fake.Feed(Resp(Seq(), 0x02, {1}));
     EXPECT_TRUE(Has(Step(), CHIPS_EV_RX_CMD_MISMATCH));
 
-    m_fake.now = K_TIMEOUT_US;
+    m_fake.now = CHIPS_TIMEOUT_US;
     EXPECT_TRUE(Has(Step(), CHIPS_EV_DONE));
     EXPECT_EQ(CHIPS_OUTCOME_TIMEOUT, Result().outcome);
     EXPECT_EQ(nullptr, Result().payload);
@@ -596,7 +586,7 @@ TEST_F(MasterTest, RequestWithOtherSeqIsReportedAsRequestNotStale) {
 TEST_F(MasterTest, EchoOfEveryResendStillTimesOut) {
     Submit(0x01);
     Step();
-    for (uint32_t t = K_RESEND_US; t < K_TIMEOUT_US; t += K_RESEND_US) {
+    for (uint32_t t = CHIPS_RESEND_PERIOD_US; t < CHIPS_TIMEOUT_US; t += CHIPS_RESEND_PERIOD_US) {
         m_fake.Feed(Request());
         m_fake.now = t;
         const uint32_t ev = Step();
@@ -605,10 +595,10 @@ TEST_F(MasterTest, EchoOfEveryResendStillTimesOut) {
         EXPECT_FALSE(Has(ev, CHIPS_EV_DONE)) << "t=" << t;
     }
 
-    m_fake.now = K_TIMEOUT_US;
+    m_fake.now = CHIPS_TIMEOUT_US;
     EXPECT_TRUE(Has(Step(), CHIPS_EV_DONE));
     EXPECT_EQ(CHIPS_OUTCOME_TIMEOUT, Result().outcome);
-    EXPECT_EQ(K_TIMEOUT_US / K_RESEND_US - 1, Count(CHIPS_EV_RX_REQUEST));
+    EXPECT_EQ(CHIPS_TIMEOUT_US / CHIPS_RESEND_PERIOD_US - 1, Count(CHIPS_EV_RX_REQUEST));
 }
 
 TEST_F(MasterTest, BytesAfterCompletionInSameReadAreDropped) {
@@ -705,7 +695,7 @@ TEST_F(MasterTest, ReadErrorDoesNotBlockTransmitOrTimeout) {
     EXPECT_TRUE(Has(ev, CHIPS_EV_RX_ERROR));
     EXPECT_TRUE(Has(ev, CHIPS_EV_TX_FRAME));
 
-    m_fake.now = K_TIMEOUT_US;
+    m_fake.now = CHIPS_TIMEOUT_US;
     EXPECT_TRUE(Has(Step(), CHIPS_EV_DONE));
     EXPECT_EQ(CHIPS_OUTCOME_TIMEOUT, Result().outcome);
 }
@@ -714,24 +704,24 @@ TEST_F(MasterTest, TimesOutExactlyAtDeadline) {
     Submit(0x01);
     Step();
 
-    m_fake.now = K_TIMEOUT_US - 1;
+    m_fake.now = CHIPS_TIMEOUT_US - 1;
     EXPECT_FALSE(Has(Step(), CHIPS_EV_DONE));
     EXPECT_EQ(CHIPS_MASTER_WAITING, State());
 
-    m_fake.now = K_TIMEOUT_US;
+    m_fake.now = CHIPS_TIMEOUT_US;
     EXPECT_TRUE(Has(Step(), CHIPS_EV_DONE));
     EXPECT_EQ(CHIPS_MASTER_IDLE, State());
     EXPECT_EQ(CHIPS_OUTCOME_TIMEOUT, Result().outcome);
-    EXPECT_EQ(K_TIMEOUT_US, Result().latency_us);
+    EXPECT_EQ(CHIPS_TIMEOUT_US, Result().latency_us);
 }
 
 TEST_F(MasterTest, TimeoutIsMeasuredFromFirstStepNotSubmit) {
     Submit(0x01);
     m_fake.now = 5000;
     Step();
-    m_fake.now = 5000 + K_TIMEOUT_US - 1;
+    m_fake.now = 5000 + CHIPS_TIMEOUT_US - 1;
     EXPECT_FALSE(Has(Step(), CHIPS_EV_DONE));
-    m_fake.now = 5000 + K_TIMEOUT_US;
+    m_fake.now = 5000 + CHIPS_TIMEOUT_US;
     EXPECT_TRUE(Has(Step(), CHIPS_EV_DONE));
     EXPECT_EQ(CHIPS_OUTCOME_TIMEOUT, Result().outcome);
 }
@@ -739,7 +729,7 @@ TEST_F(MasterTest, TimeoutIsMeasuredFromFirstStepNotSubmit) {
 TEST_F(MasterTest, ResponseArrivingAtDeadlineWins) {
     Submit(0x01);
     Step();
-    m_fake.now = K_TIMEOUT_US;
+    m_fake.now = CHIPS_TIMEOUT_US;
     m_fake.Feed(Response({5}));
     EXPECT_TRUE(Has(Step(), CHIPS_EV_DONE));
     EXPECT_EQ(CHIPS_OUTCOME_OK, Result().outcome);
@@ -749,7 +739,7 @@ TEST_F(MasterTest, NoTransmitOnTheStepThatTimesOut) {
     Submit(0x01);
     Step();
     const int writes = m_fake.write_calls;
-    m_fake.now = K_TIMEOUT_US;
+    m_fake.now = CHIPS_TIMEOUT_US;
     EXPECT_FALSE(Has(Step(), CHIPS_EV_TX_FRAME));
     EXPECT_EQ(writes, m_fake.write_calls);
 }
@@ -758,7 +748,7 @@ TEST_F(MasterTest, SendFailedWhenNoFrameEverWentOut) {
     m_fake.fail_write = true;
     Submit(0x01);
     StepUntil(CHIPS_EV_TX_ERROR);
-    m_fake.now = K_TIMEOUT_US;
+    m_fake.now = CHIPS_TIMEOUT_US;
     EXPECT_TRUE(Has(Step(), CHIPS_EV_DONE));
     EXPECT_EQ(CHIPS_OUTCOME_SEND_FAILED, Result().outcome);
 }
@@ -767,9 +757,9 @@ TEST_F(MasterTest, TimeoutAfterOneSuccessfulSendIsTimeoutEvenIfResendsFail) {
     Submit(0x01);
     Step();
     m_fake.fail_write = true;
-    m_fake.now = K_RESEND_US;
+    m_fake.now = CHIPS_RESEND_PERIOD_US;
     EXPECT_TRUE(Has(Step(), CHIPS_EV_TX_ERROR));
-    m_fake.now = K_TIMEOUT_US;
+    m_fake.now = CHIPS_TIMEOUT_US;
     EXPECT_TRUE(Has(Step(), CHIPS_EV_DONE));
     EXPECT_EQ(CHIPS_OUTCOME_TIMEOUT, Result().outcome);
 }
@@ -781,7 +771,7 @@ TEST_F(MasterTest, TimeoutWithFrameStuckInFlightAbortsTx) {
     EXPECT_EQ(1, m_fake.write_calls);
     EXPECT_TRUE(m_fake.tx.empty());
 
-    m_fake.now = K_TIMEOUT_US;
+    m_fake.now = CHIPS_TIMEOUT_US;
     EXPECT_TRUE(Has(Step(), CHIPS_EV_DONE));
     EXPECT_EQ(CHIPS_OUTCOME_SEND_FAILED, Result().outcome);
 
@@ -800,12 +790,12 @@ TEST_F(MasterTest, TimeoutWorksAcrossClockWraparound) {
     Submit(0x01);
     Step();
 
-    m_fake.now = static_cast<uint32_t>(start + K_TIMEOUT_US - 1);
+    m_fake.now = static_cast<uint32_t>(start + CHIPS_TIMEOUT_US - 1);
     EXPECT_FALSE(Has(Step(), CHIPS_EV_DONE));
-    m_fake.now = static_cast<uint32_t>(start + K_TIMEOUT_US);
+    m_fake.now = static_cast<uint32_t>(start + CHIPS_TIMEOUT_US);
     EXPECT_TRUE(Has(Step(), CHIPS_EV_DONE));
     EXPECT_EQ(CHIPS_OUTCOME_TIMEOUT, Result().outcome);
-    EXPECT_EQ(K_TIMEOUT_US, Result().latency_us);
+    EXPECT_EQ(CHIPS_TIMEOUT_US, Result().latency_us);
 }
 
 TEST_F(MasterTest, LatencyWorksAcrossClockWraparound) {

@@ -11,11 +11,6 @@ namespace {
 
 constexpr uint8_t k_cmd = static_cast<uint8_t>(0x05u & CHIPS_CMD_MASK);
 
-const bool kermit_init = [] {
-    chips_crc16_kermit_init();
-    return true;
-}();
-
 class CoreTest : public ::testing::Test {
   protected:
     void SetUp() override {
