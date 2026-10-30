@@ -18,26 +18,6 @@ extern "C" {
 #endif
 
 /* ------------------------------------------------------------------------- */
-/* Configuration                                                             */
-/* ------------------------------------------------------------------------- */
-
-/**
- * @brief Maximum bytes read from the port per step.
- *
- * Sets the receive throughput ceiling: CHIPS_MASTER_RX_CHUNK bytes per tick.
- * May be overridden at compile time.
- */
-#ifndef CHIPS_MASTER_RX_CHUNK
-#define CHIPS_MASTER_RX_CHUNK (256u)
-#endif
-
-/** @brief Static configuration. */
-typedef struct {
-    /** Delay between the starts of two copies of a request, in µs. */
-    uint32_t resend_period_us;
-} chips_master_config_t;
-
-/* ------------------------------------------------------------------------- */
 /* Results and events                                                        */
 /* ------------------------------------------------------------------------- */
 
@@ -45,24 +25,39 @@ typedef struct {
 typedef enum {
     CHIPS_SUBMIT_OK = 0,     /**< Request accepted. */
     CHIPS_SUBMIT_BUSY,       /**< A request is already in flight. */
-    CHIPS_SUBMIT_INVALID_ARG /**< Bad command, payload, response buffer or timeout. */
+    CHIPS_SUBMIT_INVALID_ARG /**< Bad command, payload or response buffer. */
 } chips_submit_status_t;
 
 /**
- * @brief How a transaction ended.
+ * @brief How a transaction ended, as seen by the master.
  *
  * Only a response frame whose sequence and command both match the request
  * ends a transaction early. Every other decoded frame is ignored and reported
  * through an event bit (#CHIPS_EV_RX_REQUEST, #CHIPS_EV_RX_STALE,
  * #CHIPS_EV_RX_CMD_MISMATCH), and the master keeps listening until the
  * deadline.
+ *
+ * Only OK says anything about the slave.
  */
 typedef enum {
     CHIPS_OUTCOME_PENDING = 0, /**< Not finished (or none submitted). */
     CHIPS_OUTCOME_OK,          /**< Response with matching sequence and command received. */
-    CHIPS_OUTCOME_TIMEOUT,     /**< Deadline passed after at least one full send. */
-    CHIPS_OUTCOME_SEND_FAILED, /**< Deadline passed and no copy was ever fully sent. */
-    CHIPS_OUTCOME_CANCELLED    /**< chips_master_cancel() was called. */
+    /**
+     * Deadline passed with no matching response, after at least one copy was
+     * completely written to the port. The slave may have executed the request.
+     */
+    CHIPS_OUTCOME_TIMEOUT,
+    /**
+     * Deadline passed and no copy was ever completely written to the port.
+     * This is not a guarantee that the slave did nothing: an incomplete copy
+     * can still be completed and executed.
+     */
+    CHIPS_OUTCOME_SEND_FAILED,
+    /**
+     * chips_master_cancel() was called. The master stopped waiting; nothing
+     * was undone, and the slave may have executed or still execute the request.
+     */
+    CHIPS_OUTCOME_CANCELLED
 } chips_outcome_t;
 
 /** @brief Event bits returned by chips_master_step(). */
@@ -70,7 +65,8 @@ enum {
     CHIPS_EV_NONE = 0u,
     CHIPS_EV_DONE = 1u << 0,           /**< Transaction finished; see chips_master_result(). */
     CHIPS_EV_TX_FRAME = 1u << 1,       /**< A full copy of the request reached the port. */
-    CHIPS_EV_TX_ERROR = 1u << 2,       /**< Port write failed; copy abandoned until next resend. */
+    CHIPS_EV_TX_ERROR = 1u << 2,       /**< Port write failed; copy abandoned until next resend. Part of it
+                                            may already be on the line. */
     CHIPS_EV_RX_ERROR = 1u << 3,       /**< Port read failed; partial frame discarded. */
     CHIPS_EV_RX_BAD_FRAME = 1u << 4,   /**< Decoder rejected a frame (escape, length, CRC). */
     CHIPS_EV_RX_STALE = 1u << 5,       /**< Response with another sequence (or before first send) ignored. */
@@ -120,13 +116,11 @@ typedef enum {
 typedef struct {
     /* Binding */
     chips_port_t port;
-    uint32_t resend_period_us;
 
     /* Transaction */
     chips_master_state_t state;
     uint8_t seq;
     uint8_t cmd;
-    uint32_t timeout_us;
     uint32_t t_start;     /**< Time of the first step. */
     uint32_t t_last_send; /**< Start time of the latest copy. */
     bool tx_started;      /**< At least one copy was started. */
@@ -155,12 +149,12 @@ typedef struct {
  *
  * Clears all state. May be called again to re-initialize; a request in
  * flight is then abandoned without I/O and its response buffer released.
+ * As with chips_master_cancel(), the slave may still execute it.
  *
  * @param m    Instance.
  * @param port Port; copied. All three functions must be non-NULL.
- * @param cfg  Configuration; resend_period_us in 1..#CHIPS_TIME_MAX_US.
  */
-void chips_master_init(chips_master_t* m, const chips_port_t* port, const chips_master_config_t* cfg);
+void chips_master_init(chips_master_t* m, const chips_port_t* port);
 
 /**
  * @brief Queue a request. No I/O happens until the next step.
@@ -185,6 +179,8 @@ void chips_master_init(chips_master_t* m, const chips_port_t* port, const chips_
  *    they are unspecified.
  *  - Once the transaction has ended, the buffer is the application's again.
  *
+ * The transaction times out #CHIPS_TIMEOUT_US after the first step.
+ *
  * @param m            Instance.
  * @param cmd          Command; at most #CHIPS_CMD_MASK.
  * @param payload      Request payload; encoded (copied) before this call
@@ -192,7 +188,6 @@ void chips_master_init(chips_master_t* m, const chips_port_t* port, const chips_
  *                     and may point into @p response_buf. May be NULL if
  *                     @p payload_len is 0.
  * @param payload_len  At most #CHIPS_MAX_PAYLOAD.
- * @param timeout_us   1..#CHIPS_TIME_MAX_US, measured from the first step.
  * @param response_buf Where the response payload is written, #CHIPS_MAX_PAYLOAD
  *                     bytes; non-NULL. Lent as described above.
  */
@@ -200,7 +195,6 @@ chips_submit_status_t chips_master_submit(chips_master_t* m,
                                           uint8_t cmd,
                                           const uint8_t* payload,
                                           size_t payload_len,
-                                          uint32_t timeout_us,
                                           uint8_t response_buf[CHIPS_MAX_PAYLOAD]);
 
 /**
@@ -211,9 +205,14 @@ chips_submit_status_t chips_master_submit(chips_master_t* m,
 uint32_t chips_master_step(chips_master_t* m);
 
 /**
- * @brief Abandon the request in flight, if any. Does no I/O.
+ * @brief Stop waiting for the request in flight, if any. Does no I/O.
  *
- * A copy being written is cut short; the slave discards the partial frame.
+ * The master stops sending and listening for this request; nothing is undone
+ * on the slave. A copy already written may have been executed. A copy being
+ * written is cut short, but is not guaranteed to be discarded: if only its
+ * closing SYNC was missing, the slave completes and executes it when the
+ * next frame's opening SYNC arrives.
+ *
  * The response buffer is released immediately.
  *
  * @return true if a request was cancelled.

@@ -36,7 +36,7 @@
 #endif
 
 #ifndef CHIPS_NO_LIBC_STRING
-#include <string.h>
+#include <string.h> // IWYU pragma: keep
 #endif
 
 #ifndef CHIPS_ASSERT
@@ -44,23 +44,20 @@
 #define CHIPS_ASSERT(expr) (assert(expr))
 #endif
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-/* ------------------------------------------------------------------------- */
-/* Configuration                                                             */
-/* ------------------------------------------------------------------------- */
-
-/**
- * @brief Bytes processed per CRC loop iteration.
- *
- * Larger values expose more independent table lookups, shortening the
- * dependency chain and improving throughput at the cost of code size.
- * May be overridden at compile time.
- */
 #ifndef CHIPS_CRC16_KERMIT_FOLD
 #define CHIPS_CRC16_KERMIT_FOLD (16u)
+#endif
+
+#ifndef CHIPS_SLAVE_RX_CHUNK
+#define CHIPS_SLAVE_RX_CHUNK (256u)
+#endif
+
+#ifndef CHIPS_MASTER_RX_CHUNK
+#define CHIPS_MASTER_RX_CHUNK (256u)
+#endif
+
+#ifdef __cplusplus
+extern "C" {
 #endif
 
 /* ------------------------------------------------------------------------- */
@@ -97,18 +94,29 @@ extern "C" {
 /** Worst-case encoded size of any frame. */
 #define CHIPS_WIRE_MAX CHIPS_WIRE_SIZE(CHIPS_MAX_PAYLOAD)
 
+/** Longest duration accepted anywhere in the API, in µs (about 35 minutes). */
+#define CHIPS_TIME_MAX_US (0x7FFFFFFFu)
+
+/** Delay between the starts of two copies of a request, in µs (1 s). */
+#define CHIPS_RESEND_PERIOD_US (1000000u)
+
+/** How long the master waits for a response, in µs (3 s). */
+#define CHIPS_TIMEOUT_US (3000000u)
+
+/** How long the slave replays a cached response, in µs (4 s). */
+#define CHIPS_CACHE_WINDOW_US (4000000u)
+
+#if CHIPS_CACHE_WINDOW_US <= CHIPS_TIMEOUT_US
+#error "CHIPS_CACHE_WINDOW_US must exceed CHIPS_TIMEOUT_US"
+#endif
+#if CHIPS_RESEND_PERIOD_US == 0u || CHIPS_RESEND_PERIOD_US > CHIPS_TIME_MAX_US || CHIPS_TIMEOUT_US == 0u || \
+    CHIPS_TIMEOUT_US > CHIPS_TIME_MAX_US || CHIPS_CACHE_WINDOW_US > CHIPS_TIME_MAX_US
+#error "CHIPS timing constants must be in 1..CHIPS_TIME_MAX_US"
+#endif
+
 /* ------------------------------------------------------------------------- */
 /* CRC-16/Kermit                                                             */
 /* ------------------------------------------------------------------------- */
-
-/**
- * @brief Initialize the CRC lookup table.
- *
- * Must be called before the first call to chips_crc16_kermit_compute().
- * Repeated calls have no effect. Once initialized, the table is read-only
- * and may be shared between threads.
- */
-void chips_crc16_kermit_init(void);
 
 /**
  * @brief Compute or update a CRC-16/Kermit checksum.

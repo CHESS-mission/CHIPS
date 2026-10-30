@@ -6,49 +6,7 @@
 #include "chips/core.h"
 
 #include "compiler.h"
-
-#define CRC16_KERMIT_POLYNOMIAL ((uint16_t)0x8408u)
-
-static uint16_t crc16_kermit_table[CHIPS_CRC16_KERMIT_FOLD][256];
-static int crc16_kermit_init;
-
-static void chips_crc16_kermit_build_base_table(void) {
-    unsigned byte;
-    for (byte = 0; byte < 256u; ++byte) {
-        uint16_t crc = (uint16_t)byte;
-        unsigned bit;
-        for (bit = 0; bit < 8u; ++bit) {
-            if (crc & 1u) {
-                crc = (uint16_t)((crc >> 1) ^ CRC16_KERMIT_POLYNOMIAL);
-            } else {
-                crc = (uint16_t)(crc >> 1);
-            }
-        }
-        crc16_kermit_table[0][byte] = crc;
-    }
-}
-
-static void chips_crc16_kermit_build_slicing_tables(void) {
-    unsigned slice;
-    for (slice = 1; slice < CHIPS_CRC16_KERMIT_FOLD; ++slice) {
-        unsigned byte;
-        for (byte = 0; byte < 256u; ++byte) {
-            const uint16_t previous = crc16_kermit_table[slice - 1u][byte];
-            const uint16_t index = (uint16_t)(previous & 0xFFu);
-            const uint16_t shifted = (uint16_t)(previous >> 8);
-            const uint16_t value = crc16_kermit_table[0][index];
-            crc16_kermit_table[slice][byte] = (uint16_t)(shifted ^ value);
-        }
-    }
-}
-
-void chips_crc16_kermit_init(void) {
-    if (crc16_kermit_init == 0) {
-        chips_crc16_kermit_build_base_table();
-        chips_crc16_kermit_build_slicing_tables();
-        crc16_kermit_init = 1;
-    }
-}
+#include "crc16_kermit_tables.h"
 
 uint16_t chips_crc16_kermit_compute(const uint8_t* data, size_t length, uint16_t crc) {
 #if CHIPS_CRC16_KERMIT_FOLD >= 2

@@ -119,14 +119,10 @@ int main(void) {
     static chips_slave_t sat;
     static uint8_t ground_rx[CHIPS_MAX_PAYLOAD];
 
-    chips_crc16_kermit_init();
-
     const chips_port_t ground_port = fd_port(&sv[0]);
     const chips_port_t sat_port = fd_port(&sv[1]);
-    const chips_master_config_t mcfg = {.resend_period_us = 50000u};
-    const chips_slave_config_t scfg = {.cache_window_us = 1000000u};
-    chips_master_init(&ground, &ground_port, &mcfg);
-    chips_slave_init(&sat, &sat_port, &scfg);
+    chips_master_init(&ground, &ground_port);
+    chips_slave_init(&sat, &sat_port);
 
     pthread_t sat_tid;
     if (pthread_create(&sat_tid, NULL, sat_thread, &sat) != 0) {
@@ -140,7 +136,7 @@ int main(void) {
 
     for (size_t q = 0; q < COUNT(questions); q++) {
         printf("ground > %s\n", questions[q]);
-        chips_master_submit(&ground, CMD_ASK, (const uint8_t*)questions[q], strlen(questions[q]), 500000u, ground_rx);
+        chips_master_submit(&ground, CMD_ASK, (const uint8_t*)questions[q], strlen(questions[q]), ground_rx);
 
         unsigned long copies = 0;
         uint32_t ev;

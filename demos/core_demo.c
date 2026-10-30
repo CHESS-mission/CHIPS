@@ -10,8 +10,6 @@
 #include "chips/core.h"
 
 int main(void) {
-    chips_crc16_kermit_init(); /* once, before anything else */
-
     /* Encode a request (cmd 0x10) into a wire frame. */
     static const uint8_t payload[] = {0x01, 0x7E, 0x02};
     static uint8_t wire[CHIPS_WIRE_MAX];

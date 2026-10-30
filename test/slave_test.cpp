@@ -16,15 +16,11 @@ namespace {
 
 using namespace chips_test;
 
-constexpr uint32_t K_WINDOW_US = 5000;
-
 class SlaveTest : public ::testing::Test {
   protected:
     void SetUp() override {
         m_port = m_fake.Port();
-        m_cfg = chips_slave_config_t{};
-        m_cfg.cache_window_us = K_WINDOW_US;
-        chips_slave_init(&m_slave, &m_port, &m_cfg);
+        chips_slave_init(&m_slave, &m_port);
     }
 
     uint32_t Step() {
@@ -93,7 +89,6 @@ class SlaveTest : public ::testing::Test {
 
     FakePort m_fake;
     chips_port_t m_port{};
-    chips_slave_config_t m_cfg{};
     chips_slave_t m_slave;
     EventTally m_tally;
 };
@@ -427,7 +422,7 @@ TEST_F(SlaveTest, DuplicateWithinWindowRetransmitsCachedResponse) {
     const Bytes req = Req(4, 0x10, {1, 2});
     const Bytes frame = Serve(req, {3, 4});
 
-    m_fake.now = K_WINDOW_US - 1;
+    m_fake.now = CHIPS_CACHE_WINDOW_US - 1;
     m_fake.Feed(req);
     const uint32_t ev = Step();
 
@@ -458,7 +453,7 @@ TEST_F(SlaveTest, DuplicateAtWindowBoundaryIsDeliveredAgain) {
     m_fake.now = 500;
     Serve(req);
 
-    m_fake.now = 500 + K_WINDOW_US;
+    m_fake.now = 500 + CHIPS_CACHE_WINDOW_US;
     m_fake.Feed(req);
     const uint32_t ev = Step();
 
@@ -478,7 +473,7 @@ TEST_F(SlaveTest, WindowIsMeasuredFromRespondCall) {
     Step();
     m_fake.tx.clear();
 
-    m_fake.now = 2000 + K_WINDOW_US - 1;
+    m_fake.now = 2000 + CHIPS_CACHE_WINDOW_US - 1;
     m_fake.Feed(req);
     EXPECT_TRUE(Has(Step(), CHIPS_SLAVE_EV_RETRANSMIT));
 }
@@ -486,7 +481,7 @@ TEST_F(SlaveTest, WindowIsMeasuredFromRespondCall) {
 TEST_F(SlaveTest, ExpiredCacheIsNotUsedAgain) {
     const Bytes req = Req(4, 0x10);
     Serve(req);
-    m_fake.now = K_WINDOW_US;
+    m_fake.now = CHIPS_CACHE_WINDOW_US;
     Deliver(req);
     ASSERT_EQ(CHIPS_RESPOND_OK, chips_slave_abandon(&m_slave));
 
@@ -503,11 +498,11 @@ TEST_F(SlaveTest, CacheWindowWorksAcrossClockWraparound) {
     m_fake.now = start;
     Serve(req);
 
-    m_fake.now = static_cast<uint32_t>(start + K_WINDOW_US - 1);
+    m_fake.now = static_cast<uint32_t>(start + CHIPS_CACHE_WINDOW_US - 1);
     m_fake.Feed(req);
     EXPECT_TRUE(Has(Step(), CHIPS_SLAVE_EV_RETRANSMIT));
 
-    m_fake.now = static_cast<uint32_t>(start + K_WINDOW_US);
+    m_fake.now = static_cast<uint32_t>(start + CHIPS_CACHE_WINDOW_US);
     m_fake.Feed(req);
     EXPECT_TRUE(Has(Step(), CHIPS_SLAVE_EV_REQUEST));
 }
@@ -725,6 +720,80 @@ TEST_F(SlaveTest, BackToBackExchanges) {
     EXPECT_EQ(5u, Count(CHIPS_SLAVE_EV_REQUEST));
     EXPECT_EQ(5u, Count(CHIPS_SLAVE_EV_TX_FRAME));
     EXPECT_EQ(0u, Count(CHIPS_SLAVE_EV_RETRANSMIT));
+}
+
+TEST_F(SlaveTest, IdleStepExpiresCacheAtWindowBoundary) {
+    m_fake.now = 500;
+    Serve(Req(4, 0x10));
+    ASSERT_TRUE(m_slave.cache_valid);
+
+    m_fake.now = 500 + CHIPS_CACHE_WINDOW_US - 1;
+    EXPECT_EQ(static_cast<uint32_t>(CHIPS_SLAVE_EV_NONE), Step());
+    EXPECT_TRUE(m_slave.cache_valid);
+
+    m_fake.now = 500 + CHIPS_CACHE_WINDOW_US;
+    EXPECT_EQ(static_cast<uint32_t>(CHIPS_SLAVE_EV_NONE), Step());
+    EXPECT_FALSE(m_slave.cache_valid);
+}
+
+TEST_F(SlaveTest, CacheExpiredByIdleTickStaysExpiredAfterClockWraps) {
+    const Bytes req = Req(4, 0x10);
+    m_fake.now = 1000;
+    Serve(req);
+
+    m_fake.now = 1000 + CHIPS_CACHE_WINDOW_US;
+    Step();
+
+    m_fake.now = 1000 + 10;
+    m_fake.Feed(req);
+    const uint32_t ev = Step();
+    EXPECT_TRUE(Has(ev, CHIPS_SLAVE_EV_REQUEST));
+    EXPECT_FALSE(Has(ev, CHIPS_SLAVE_EV_RETRANSMIT));
+    EXPECT_TRUE(m_fake.tx.empty());
+}
+
+TEST_F(SlaveTest, ReadErrorStepStillExpiresCache) {
+    Serve(Req(1, 0x01));
+    m_fake.now = CHIPS_CACHE_WINDOW_US;
+    m_fake.fail_read = true;
+
+    EXPECT_TRUE(Has(Step(), CHIPS_SLAVE_EV_RX_ERROR));
+    EXPECT_FALSE(m_slave.cache_valid);
+}
+
+TEST_F(SlaveTest, ExpiryDoesNotAbortResponseInFlight) {
+    m_fake.max_write = 2;
+    const Bytes req = Req(1, 0x01);
+    Deliver(req);
+    Respond({1, 2, 3, 4, 5, 6});
+    const Bytes expected = Resp(1, 0x01, {1, 2, 3, 4, 5, 6});
+    ASSERT_FALSE(Has(Step(), CHIPS_SLAVE_EV_TX_FRAME));
+
+    m_fake.now = CHIPS_CACHE_WINDOW_US;
+    EXPECT_TRUE(Has(StepUntil(CHIPS_SLAVE_EV_TX_FRAME, 100), CHIPS_SLAVE_EV_TX_FRAME));
+    EXPECT_FALSE(m_slave.cache_valid);
+    EXPECT_EQ(expected, m_fake.tx);
+
+    m_fake.tx.clear();
+    m_fake.Feed(req);
+    const uint32_t ev = Step();
+    EXPECT_TRUE(Has(ev, CHIPS_SLAVE_EV_REQUEST));
+    EXPECT_FALSE(Has(ev, CHIPS_SLAVE_EV_RETRANSMIT));
+    EXPECT_TRUE(m_fake.tx.empty());
+}
+
+TEST_F(SlaveTest, ExpiryWhilePendingKeepsRequest) {
+    Serve(Req(1, 0x01));
+    Deliver(Req(2, 0x01, {5}));
+
+    m_fake.now = CHIPS_CACHE_WINDOW_US;
+    Step();
+
+    EXPECT_FALSE(m_slave.cache_valid);
+    EXPECT_EQ(CHIPS_SLAVE_PENDING, State());
+    ASSERT_NE(nullptr, Request());
+    EXPECT_EQ(2u, Request()->seq);
+    EXPECT_EQ((Bytes{5}), RequestPayload());
 }
 
 }  // namespace

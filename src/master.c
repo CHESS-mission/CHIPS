@@ -125,7 +125,7 @@ static uint32_t continue_transmission(chips_master_t* m) {
 
 static uint32_t transmit(chips_master_t* m, uint32_t now) {
     if (!tx_in_flight(m)) {
-        if (m->tx_started && elapsed_us(now, m->t_last_send) < m->resend_period_us) {
+        if (m->tx_started && elapsed_us(now, m->t_last_send) < CHIPS_RESEND_PERIOD_US) {
             return CHIPS_EV_NONE;
         }
         m->tx_started = true;
@@ -146,7 +146,7 @@ static uint32_t idle_step(chips_master_t* m) {
 static uint32_t txn_step(chips_master_t* m, uint32_t now) {
     uint32_t ev = receive(m, now);
 
-    if (m->state == CHIPS_MASTER_WAITING && elapsed_us(now, m->t_start) >= m->timeout_us) {
+    if (m->state == CHIPS_MASTER_WAITING && elapsed_us(now, m->t_start) >= CHIPS_TIMEOUT_US) {
         const chips_outcome_t outcome = m->sent_ok ? CHIPS_OUTCOME_TIMEOUT : CHIPS_OUTCOME_SEND_FAILED;
         ev |= finish(m, outcome, elapsed_us(now, m->t_start));
     }
@@ -157,16 +157,12 @@ static uint32_t txn_step(chips_master_t* m, uint32_t now) {
     return ev;
 }
 
-void chips_master_init(chips_master_t* m, const chips_port_t* port, const chips_master_config_t* cfg) {
-    CHIPS_ASSERT(m != NULL && port != NULL && cfg != NULL);
+void chips_master_init(chips_master_t* m, const chips_port_t* port) {
+    CHIPS_ASSERT(m != NULL && port != NULL);
     CHIPS_ASSERT(port->write != NULL && port->read != NULL && port->now_us != NULL);
-    CHIPS_ASSERT(cfg->resend_period_us > 0 && cfg->resend_period_us <= CHIPS_TIME_MAX_US);
-
-    chips_crc16_kermit_init();
 
     *m = (chips_master_t){0};
     m->port = *port;
-    m->resend_period_us = cfg->resend_period_us;
     m->state = CHIPS_MASTER_IDLE;
     m->result.outcome = CHIPS_OUTCOME_PENDING;
 }
@@ -175,7 +171,6 @@ chips_submit_status_t chips_master_submit(chips_master_t* m,
                                           uint8_t cmd,
                                           const uint8_t* payload,
                                           size_t payload_len,
-                                          uint32_t timeout_us,
                                           uint8_t response_buf[CHIPS_MAX_PAYLOAD]) {
     CHIPS_ASSERT(m != NULL);
 
@@ -183,13 +178,12 @@ chips_submit_status_t chips_master_submit(chips_master_t* m,
         return CHIPS_SUBMIT_BUSY;
     }
     if (cmd > CHIPS_CMD_MASK || payload_len > CHIPS_MAX_PAYLOAD || (payload == NULL && payload_len > 0) ||
-        timeout_us == 0 || timeout_us > CHIPS_TIME_MAX_US || response_buf == NULL) {
+        response_buf == NULL) {
         return CHIPS_SUBMIT_INVALID_ARG;
     }
 
     m->seq = (uint8_t)(m->seq + 1u);
     m->cmd = cmd;
-    m->timeout_us = timeout_us;
     m->t_start = 0;
     m->t_last_send = 0;
     m->tx_started = false;

@@ -29,6 +29,12 @@ static bool same_request(const chips_slave_fingerprint_t* a, const chips_slave_f
     return a->seq == b->seq && a->cmd == b->cmd && a->crc == b->crc;
 }
 
+static void expire_cache(chips_slave_t* s) {
+    if (s->cache_valid && elapsed_us(s->now, s->t_cached) >= CHIPS_CACHE_WINDOW_US) {
+        s->cache_valid = false;
+    }
+}
+
 static uint32_t deliver(chips_slave_t* s, const chips_slave_fingerprint_t* fp) {
     CHIPS_ASSERT(s->frame.payload == s->rx_payload[s->rx_active]);
 
@@ -57,14 +63,11 @@ static uint32_t on_frame(chips_slave_t* s) {
     const chips_slave_fingerprint_t fp = fingerprint(&s->frame);
 
     if (s->cache_valid && same_request(&fp, &s->cached)) {
-        if (elapsed_us(s->now, s->t_cached) < s->cache_window_us) {
-            if (tx_in_flight(s)) {
-                return CHIPS_SLAVE_EV_RX_IGNORED;
-            }
-            s->tx_off = 0;
-            return CHIPS_SLAVE_EV_RETRANSMIT;
+        if (tx_in_flight(s)) {
+            return CHIPS_SLAVE_EV_RX_IGNORED;
         }
-        s->cache_valid = false;
+        s->tx_off = 0;
+        return CHIPS_SLAVE_EV_RETRANSMIT;
     }
 
     return deliver(s, &fp);
@@ -147,16 +150,12 @@ static void release_request(chips_slave_t* s) {
     s->state = CHIPS_SLAVE_LISTENING;
 }
 
-void chips_slave_init(chips_slave_t* s, const chips_port_t* port, const chips_slave_config_t* cfg) {
-    CHIPS_ASSERT(s != NULL && port != NULL && cfg != NULL);
+void chips_slave_init(chips_slave_t* s, const chips_port_t* port) {
+    CHIPS_ASSERT(s != NULL && port != NULL);
     CHIPS_ASSERT(port->write != NULL && port->read != NULL && port->now_us != NULL);
-    CHIPS_ASSERT(cfg->cache_window_us > 0 && cfg->cache_window_us <= CHIPS_TIME_MAX_US);
-
-    chips_crc16_kermit_init();
 
     *s = (chips_slave_t){0};
     s->port = *port;
-    s->cache_window_us = cfg->cache_window_us;
     s->state = CHIPS_SLAVE_LISTENING;
     s->cache_valid = false;
     s->tx_len = 0;
@@ -169,6 +168,7 @@ uint32_t chips_slave_step(chips_slave_t* s) {
     CHIPS_ASSERT(s != NULL);
 
     s->now = s->port.now_us(s->port.ctx);
+    expire_cache(s);
 
     uint32_t ev = receive(s);
     ev |= transmit(s);
