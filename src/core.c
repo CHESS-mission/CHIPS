@@ -7,6 +7,14 @@
 
 #include "crc16_kermit_tables.h"
 
+#if defined(__clang__)
+    #define CHIPS_UNROLL_FULL _Pragma("clang loop unroll(full)")
+#elif defined(__GNUC__)
+    #define CHIPS_UNROLL_FULL _Pragma("GCC unroll 65534")
+#else
+    #define CHIPS_UNROLL_FULL
+#endif
+
 uint16_t chips_crc16_kermit_compute(const uint8_t* data, size_t length, uint16_t crc) {
 #if CHIPS_CRC16_KERMIT_FOLD >= 2
     while (length >= CHIPS_CRC16_KERMIT_FOLD) {
