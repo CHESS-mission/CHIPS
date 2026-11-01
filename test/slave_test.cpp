@@ -20,7 +20,7 @@ class SlaveTest : public ::testing::Test {
   protected:
     void SetUp() override {
         m_port = m_fake.Port();
-        chips_slave_init(&m_slave, &m_port);
+        chips_slave_init(&m_slave, &m_port, &m_timing);
     }
 
     uint32_t Step() {
@@ -89,6 +89,7 @@ class SlaveTest : public ::testing::Test {
 
     FakePort m_fake;
     chips_port_t m_port{};
+    chips_timing_t m_timing = TestTiming();
     chips_slave_t m_slave;
     EventTally m_tally;
 };
@@ -116,7 +117,7 @@ TEST_F(SlaveTest, EveryStepReadsOnce) {
 }
 
 TEST_F(SlaveTest, ReadsAtMostOneChunkPerStep) {
-    const Bytes junk(CHIPS_SLAVE_RX_CHUNK + 10, 0x00);
+    const Bytes junk(CHIPS_RX_CHUNK + 10, 0x00);
     m_fake.Feed(junk);
     Step();
     EXPECT_EQ(10u, m_fake.rx.size());
@@ -422,7 +423,7 @@ TEST_F(SlaveTest, DuplicateWithinWindowRetransmitsCachedResponse) {
     const Bytes req = Req(4, 0x10, {1, 2});
     const Bytes frame = Serve(req, {3, 4});
 
-    m_fake.now = CHIPS_CACHE_WINDOW_US - 1;
+    m_fake.now = K_CACHE_WINDOW - Ns(1);
     m_fake.Feed(req);
     const uint32_t ev = Step();
 
@@ -440,7 +441,7 @@ TEST_F(SlaveTest, EveryDuplicateWithinWindowIsRetransmitted) {
     const Bytes frame = Serve(req);
 
     for (int i = 0; i < 3; ++i) {
-        m_fake.now += 100;
+        m_fake.now += Ms(100);
         m_fake.Feed(req);
         EXPECT_TRUE(Has(Step(), CHIPS_SLAVE_EV_RETRANSMIT));
     }
@@ -450,10 +451,10 @@ TEST_F(SlaveTest, EveryDuplicateWithinWindowIsRetransmitted) {
 
 TEST_F(SlaveTest, DuplicateAtWindowBoundaryIsDeliveredAgain) {
     const Bytes req = Req(4, 0x10, {1});
-    m_fake.now = 500;
+    m_fake.now = Ms(500);
     Serve(req);
 
-    m_fake.now = 500 + CHIPS_CACHE_WINDOW_US;
+    m_fake.now = Ms(500) + K_CACHE_WINDOW;
     m_fake.Feed(req);
     const uint32_t ev = Step();
 
@@ -466,14 +467,14 @@ TEST_F(SlaveTest, DuplicateAtWindowBoundaryIsDeliveredAgain) {
 
 TEST_F(SlaveTest, WindowIsMeasuredFromRespondCall) {
     const Bytes req = Req(4, 0x10);
-    m_fake.now = 0;
+    m_fake.now = Ms(0);
     Deliver(req);
-    m_fake.now = 2000;
+    m_fake.now = Ms(2000);
     Respond();
     Step();
     m_fake.tx.clear();
 
-    m_fake.now = 2000 + CHIPS_CACHE_WINDOW_US - 1;
+    m_fake.now = Ms(2000) + K_CACHE_WINDOW - Ns(1);
     m_fake.Feed(req);
     EXPECT_TRUE(Has(Step(), CHIPS_SLAVE_EV_RETRANSMIT));
 }
@@ -481,11 +482,11 @@ TEST_F(SlaveTest, WindowIsMeasuredFromRespondCall) {
 TEST_F(SlaveTest, ExpiredCacheIsNotUsedAgain) {
     const Bytes req = Req(4, 0x10);
     Serve(req);
-    m_fake.now = CHIPS_CACHE_WINDOW_US;
+    m_fake.now = K_CACHE_WINDOW;
     Deliver(req);
     ASSERT_EQ(CHIPS_RESPOND_OK, chips_slave_abandon(&m_slave));
 
-    m_fake.now += 1;
+    m_fake.now += Ns(1);
     m_fake.Feed(req);
     const uint32_t ev = Step();
     EXPECT_TRUE(Has(ev, CHIPS_SLAVE_EV_REQUEST));
@@ -494,15 +495,17 @@ TEST_F(SlaveTest, ExpiredCacheIsNotUsedAgain) {
 
 TEST_F(SlaveTest, CacheWindowWorksAcrossClockWraparound) {
     const Bytes req = Req(4, 0x10);
-    const uint32_t start = std::numeric_limits<uint32_t>::max() - 99;
+    /* 100 ms before tv_sec wraps from 2^32 - 1 to 0. */
+    const chips_time_t start = Ms(0) - Ms(100);
+    ASSERT_EQ(std::numeric_limits<uint32_t>::max(), start.tv_sec);
     m_fake.now = start;
     Serve(req);
 
-    m_fake.now = static_cast<uint32_t>(start + CHIPS_CACHE_WINDOW_US - 1);
+    m_fake.now = start + K_CACHE_WINDOW - Ns(1);
     m_fake.Feed(req);
     EXPECT_TRUE(Has(Step(), CHIPS_SLAVE_EV_RETRANSMIT));
 
-    m_fake.now = static_cast<uint32_t>(start + CHIPS_CACHE_WINDOW_US);
+    m_fake.now = start + K_CACHE_WINDOW;
     m_fake.Feed(req);
     EXPECT_TRUE(Has(Step(), CHIPS_SLAVE_EV_REQUEST));
 }
@@ -723,28 +726,29 @@ TEST_F(SlaveTest, BackToBackExchanges) {
 }
 
 TEST_F(SlaveTest, IdleStepExpiresCacheAtWindowBoundary) {
-    m_fake.now = 500;
+    m_fake.now = Ms(500);
     Serve(Req(4, 0x10));
     ASSERT_TRUE(m_slave.cache_valid);
 
-    m_fake.now = 500 + CHIPS_CACHE_WINDOW_US - 1;
+    m_fake.now = Ms(500) + K_CACHE_WINDOW - Ns(1);
     EXPECT_EQ(static_cast<uint32_t>(CHIPS_SLAVE_EV_NONE), Step());
     EXPECT_TRUE(m_slave.cache_valid);
 
-    m_fake.now = 500 + CHIPS_CACHE_WINDOW_US;
+    m_fake.now = Ms(500) + K_CACHE_WINDOW;
     EXPECT_EQ(static_cast<uint32_t>(CHIPS_SLAVE_EV_NONE), Step());
     EXPECT_FALSE(m_slave.cache_valid);
 }
 
 TEST_F(SlaveTest, CacheExpiredByIdleTickStaysExpiredAfterClockWraps) {
     const Bytes req = Req(4, 0x10);
-    m_fake.now = 1000;
+    m_fake.now = Ms(1000);
     Serve(req);
 
-    m_fake.now = 1000 + CHIPS_CACHE_WINDOW_US;
+    m_fake.now = Ms(1000) + K_CACHE_WINDOW;
     Step();
 
-    m_fake.now = 1000 + 10;
+    /* Back to 10 ms after the response, as if tv_sec had come all the way round. */
+    m_fake.now = Ms(1000) + Ms(10);
     m_fake.Feed(req);
     const uint32_t ev = Step();
     EXPECT_TRUE(Has(ev, CHIPS_SLAVE_EV_REQUEST));
@@ -754,7 +758,7 @@ TEST_F(SlaveTest, CacheExpiredByIdleTickStaysExpiredAfterClockWraps) {
 
 TEST_F(SlaveTest, ReadErrorStepStillExpiresCache) {
     Serve(Req(1, 0x01));
-    m_fake.now = CHIPS_CACHE_WINDOW_US;
+    m_fake.now = K_CACHE_WINDOW;
     m_fake.fail_read = true;
 
     EXPECT_TRUE(Has(Step(), CHIPS_SLAVE_EV_RX_ERROR));
@@ -769,7 +773,7 @@ TEST_F(SlaveTest, ExpiryDoesNotAbortResponseInFlight) {
     const Bytes expected = Resp(1, 0x01, {1, 2, 3, 4, 5, 6});
     ASSERT_FALSE(Has(Step(), CHIPS_SLAVE_EV_TX_FRAME));
 
-    m_fake.now = CHIPS_CACHE_WINDOW_US;
+    m_fake.now = K_CACHE_WINDOW;
     EXPECT_TRUE(Has(StepUntil(CHIPS_SLAVE_EV_TX_FRAME, 100), CHIPS_SLAVE_EV_TX_FRAME));
     EXPECT_FALSE(m_slave.cache_valid);
     EXPECT_EQ(expected, m_fake.tx);
@@ -786,7 +790,7 @@ TEST_F(SlaveTest, ExpiryWhilePendingKeepsRequest) {
     Serve(Req(1, 0x01));
     Deliver(Req(2, 0x01, {5}));
 
-    m_fake.now = CHIPS_CACHE_WINDOW_US;
+    m_fake.now = K_CACHE_WINDOW;
     Step();
 
     EXPECT_FALSE(m_slave.cache_valid);
@@ -794,6 +798,29 @@ TEST_F(SlaveTest, ExpiryWhilePendingKeepsRequest) {
     ASSERT_NE(nullptr, Request());
     EXPECT_EQ(2u, Request()->seq);
     EXPECT_EQ((Bytes{5}), RequestPayload());
+}
+
+TEST_F(SlaveTest, CacheWindowFollowsConfiguredTiming) {
+    m_timing.resend_period = Ms(1000);
+    m_timing.max_resends = 0;
+    chips_slave_init(&m_slave, &m_port, &m_timing);
+    ASSERT_EQ(Ms(2000), m_slave.cache_window);
+
+    const Bytes req = Req(4, 0x10);
+    Serve(req);
+
+    m_fake.now = Ms(2000) - Ns(1);
+    m_fake.Feed(req);
+    EXPECT_TRUE(Has(Step(), CHIPS_SLAVE_EV_RETRANSMIT));
+
+    m_fake.now = Ms(2000);
+    m_fake.Feed(req);
+    EXPECT_TRUE(Has(Step(), CHIPS_SLAVE_EV_REQUEST));
+}
+
+TEST_F(SlaveTest, DefaultFixtureWindowMatchesTimingHelper) {
+    EXPECT_EQ(chips_timing_cache_window(&m_timing), m_slave.cache_window);
+    EXPECT_EQ(K_CACHE_WINDOW, m_slave.cache_window);
 }
 
 }  // namespace

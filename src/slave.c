@@ -5,144 +5,62 @@
 
 #include "chips/slave.h"
 
-static uint32_t elapsed_us(uint32_t now, uint32_t since) {
-    return (uint32_t)(now - since);
+static bool same_request(const chips_slave_fingerprint_t* fp, const chips_frame_t* f) {
+    return fp->seq == f->seq && fp->cmd == f->cmd && fp->crc == f->crc;
 }
 
-static bool tx_in_flight(const chips_slave_t* s) {
-    return s->tx_off < s->tx_len;
-}
-
-static void tx_abort(chips_slave_t* s) {
-    s->tx_off = s->tx_len;
-}
-
-static chips_slave_fingerprint_t fingerprint(const chips_frame_t* f) {
-    chips_slave_fingerprint_t fp;
-    fp.seq = f->seq;
-    fp.cmd = f->cmd;
-    fp.crc = f->crc;
-    return fp;
-}
-
-static bool same_request(const chips_slave_fingerprint_t* a, const chips_slave_fingerprint_t* b) {
-    return a->seq == b->seq && a->cmd == b->cmd && a->crc == b->crc;
-}
-
-static void expire_cache(chips_slave_t* s) {
-    if (s->cache_valid && elapsed_us(s->now, s->t_cached) >= CHIPS_CACHE_WINDOW_US) {
+static void expire_cache(chips_slave_t* s, chips_time_t now) {
+    if (s->cache_valid && chips_time_cmp(chips_time_sub(now, s->t_cached), s->cache_window) >= 0) {
         s->cache_valid = false;
     }
 }
 
-static uint32_t deliver(chips_slave_t* s, const chips_slave_fingerprint_t* fp) {
-    CHIPS_ASSERT(s->frame.payload == s->rx_payload[s->rx_active]);
+static uint32_t deliver(chips_slave_t* s) {
+    const chips_frame_t* f = chips_link_frame(&s->link);
+    CHIPS_ASSERT(f->payload == s->rx_payload[s->rx_active]);
 
-    s->request.seq = s->frame.seq;
-    s->request.cmd = s->frame.cmd;
-    s->request.payload = s->frame.payload;
-    s->request.payload_len = s->frame.payload_len;
+    s->request.seq = f->seq;
+    s->request.cmd = f->cmd;
+    s->request.payload = f->payload;
+    s->request.payload_len = f->payload_len;
+    s->request_crc = f->crc;
 
     s->rx_active ^= 1u;
-    chips_decoder_set_buffer(&s->dec, s->rx_payload[s->rx_active]);
+    chips_link_rx_swap(&s->link, s->rx_payload[s->rx_active]);
 
-    s->pending = *fp;
     s->state = CHIPS_SLAVE_PENDING;
     return CHIPS_SLAVE_EV_REQUEST;
 }
 
 static uint32_t on_frame(chips_slave_t* s) {
-    if (s->frame.direction != CHIPS_DIR_REQUEST) {
+    const chips_frame_t* f = chips_link_frame(&s->link);
+
+    if (f->direction != CHIPS_DIR_REQUEST || s->state == CHIPS_SLAVE_PENDING) {
         return CHIPS_SLAVE_EV_RX_IGNORED;
     }
-
-    if (s->state == CHIPS_SLAVE_PENDING) {
-        return CHIPS_SLAVE_EV_RX_IGNORED;
-    }
-
-    const chips_slave_fingerprint_t fp = fingerprint(&s->frame);
-
-    if (s->cache_valid && same_request(&fp, &s->cached)) {
-        if (tx_in_flight(s)) {
+    if (s->cache_valid && same_request(&s->cached, f)) {
+        if (chips_link_tx_busy(&s->link)) {
             return CHIPS_SLAVE_EV_RX_IGNORED;
         }
-        s->tx_off = 0;
+        chips_link_restart(&s->link);
         return CHIPS_SLAVE_EV_RETRANSMIT;
     }
-
-    return deliver(s, &fp);
+    return deliver(s);
 }
 
 static uint32_t receive(chips_slave_t* s) {
     uint32_t ev = CHIPS_SLAVE_EV_NONE;
-    size_t n = 0;
 
-    if (s->port.read(s->port.ctx, s->rx_chunk, sizeof(s->rx_chunk), &n) != CHIPS_IO_OK) {
-        (void)chips_decoder_reset(&s->dec);
+    if (!chips_link_read(&s->link)) {
         return CHIPS_SLAVE_EV_RX_ERROR;
     }
-    CHIPS_ASSERT(n <= sizeof(s->rx_chunk));
-    if (n > sizeof(s->rx_chunk)) {
-        n = sizeof(s->rx_chunk);
-    }
-
-    const uint8_t* p = s->rx_chunk;
-    size_t left = n;
-
-    while (left > 0) {
-        size_t used = 0;
-        const chips_dec_status_t st = chips_decode(&s->dec, p, left, &used, &s->frame);
-        CHIPS_ASSERT(used <= left);
-        if (used == 0 || used > left) {
-            (void)chips_decoder_reset(&s->dec);
-            break;
+    for (;;) {
+        const chips_dec_status_t st = chips_link_next(&s->link);
+        if (st == CHIPS_DEC_NEED_MORE) {
+            return ev;
         }
-        p += used;
-        left -= used;
-
-        switch (st) {
-            case CHIPS_DEC_NEED_MORE:
-                break;
-            case CHIPS_DEC_FRAME:
-                ev |= on_frame(s);
-                break;
-            case CHIPS_DEC_ERR_ESCAPE:
-            case CHIPS_DEC_ERR_TOO_LONG:
-            case CHIPS_DEC_ERR_TOO_SHORT:
-            case CHIPS_DEC_ERR_CRC:
-                ev |= CHIPS_SLAVE_EV_RX_BAD_FRAME;
-                break;
-            case CHIPS_DEC_ERR_ARG:
-            default:
-                CHIPS_ASSERT(0);
-                break;
-        }
+        ev |= (st == CHIPS_DEC_FRAME) ? on_frame(s) : CHIPS_SLAVE_EV_RX_BAD_FRAME;
     }
-    return ev;
-}
-
-static uint32_t transmit(chips_slave_t* s) {
-    if (!tx_in_flight(s)) {
-        return CHIPS_SLAVE_EV_NONE;
-    }
-
-    const size_t want = s->tx_len - s->tx_off;
-    size_t written = 0;
-    if (s->port.write(s->port.ctx, &s->tx_frame[s->tx_off], want, &written) != CHIPS_IO_OK) {
-        s->tx_off = s->tx_len;
-        return CHIPS_SLAVE_EV_TX_ERROR;
-    }
-    CHIPS_ASSERT(written <= want);
-    if (written > want) {
-        written = want;
-    }
-
-    s->tx_off += written;
-
-    if (written < want) {
-        return CHIPS_SLAVE_EV_NONE;
-    }
-    return CHIPS_SLAVE_EV_TX_FRAME;
 }
 
 static void release_request(chips_slave_t* s) {
@@ -150,29 +68,22 @@ static void release_request(chips_slave_t* s) {
     s->state = CHIPS_SLAVE_LISTENING;
 }
 
-void chips_slave_init(chips_slave_t* s, const chips_port_t* port) {
-    CHIPS_ASSERT(s != NULL && port != NULL);
-    CHIPS_ASSERT(port->write != NULL && port->read != NULL && port->now_us != NULL);
+void chips_slave_init(chips_slave_t* s, const chips_port_t* port, const chips_timing_t* timing) {
+    CHIPS_ASSERT(s != NULL);
 
     *s = (chips_slave_t){0};
-    s->port = *port;
-    s->state = CHIPS_SLAVE_LISTENING;
-    s->cache_valid = false;
-    s->tx_len = 0;
-    s->tx_off = 0;
-    s->rx_active = 0;
-    chips_decoder_init(&s->dec, s->rx_payload[s->rx_active]);
+    chips_link_init(&s->link, port);
+    chips_link_rx_attach(&s->link, s->rx_payload[s->rx_active]);
+    s->cache_window = chips_timing_cache_window(timing);
 }
 
 uint32_t chips_slave_step(chips_slave_t* s) {
     CHIPS_ASSERT(s != NULL);
 
-    s->now = s->port.now_us(s->port.ctx);
-    expire_cache(s);
+    expire_cache(s, chips_link_now(&s->link));
 
-    uint32_t ev = receive(s);
-    ev |= transmit(s);
-    return ev;
+    const uint32_t ev = receive(s);
+    return ev | chips_link_write(&s->link);
 }
 
 const chips_slave_request_t* chips_slave_request(const chips_slave_t* s) {
@@ -186,19 +97,16 @@ chips_respond_status_t chips_slave_respond(chips_slave_t* s, const uint8_t* payl
     if (s->state != CHIPS_SLAVE_PENDING) {
         return CHIPS_RESPOND_NO_REQUEST;
     }
-    if (payload_len > CHIPS_MAX_PAYLOAD || (payload == NULL && payload_len > 0)) {
+    if (!chips_link_encode(&s->link, s->request.seq, CHIPS_DIR_RESPONSE, s->request.cmd, payload, payload_len)) {
         return CHIPS_RESPOND_INVALID_ARG;
     }
-
-    tx_abort(s);
-
-    s->tx_len = chips_encode(s->pending.seq, CHIPS_DIR_RESPONSE, s->pending.cmd, payload, payload_len, s->tx_frame);
-    CHIPS_ASSERT(s->tx_len > 0 && s->tx_len <= sizeof(s->tx_frame));
-    s->tx_off = 0;
+    chips_link_restart(&s->link);
 
     s->cache_valid = true;
-    s->cached = s->pending;
-    s->t_cached = s->port.now_us(s->port.ctx);
+    s->cached.seq = s->request.seq;
+    s->cached.cmd = s->request.cmd;
+    s->cached.crc = s->request_crc;
+    s->t_cached = chips_link_now(&s->link);
 
     release_request(s);
     return CHIPS_RESPOND_OK;
@@ -216,7 +124,7 @@ chips_respond_status_t chips_slave_abandon(chips_slave_t* s) {
 
 void chips_slave_invalidate_cache(chips_slave_t* s) {
     CHIPS_ASSERT(s != NULL);
-    tx_abort(s);
+    chips_link_abort(&s->link);
     s->cache_valid = false;
 }
 

@@ -4,14 +4,16 @@
  */
 
 /**
- * @file chips_core.h
- * @brief CHIPS protocol core: framing, byte stuffing and CRC-16/Kermit.
+ * @file core.h
+ * @brief CHIPS protocol core: framing, byte stuffing, CRC-16/Kermit and timing.
  *
  * Provides the building blocks for exchanging CHIPS packets over a byte
  * stream:
  *  - a table-driven CRC-16/Kermit implementation,
  *  - an encoder producing delimited, byte-stuffed wire frames,
- *  - a streaming decoder tolerant of arbitrary input fragmentation.
+ *  - a streaming decoder tolerant of arbitrary input fragmentation,
+ *  - wrapping-safe time arithmetic and the retransmission timing shared by
+ *    master and slave.
  *
  * Wire format (before byte stuffing, between #CHIPS_SYNC delimiters):
  * @verbatim
@@ -28,6 +30,7 @@
 #ifndef CHIPS_CORE_H
 #define CHIPS_CORE_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -35,25 +38,27 @@
 #include CHIPS_CONFIG_FILE
 #endif
 
-#ifndef CHIPS_NO_LIBC_STRING
-#include <string.h> // IWYU pragma: keep
-#endif
-
+/*
+ * Contract checks. Functions that report invalid input through their result
+ * (chips_encode(), chips_decode(), chips_master_submit(), ...) check it at run
+ * time. Every other precondition is checked only by CHIPS_ASSERT; with
+ * assertions disabled, violating one is undefined behaviour.
+ */
 #ifndef CHIPS_ASSERT
 #include <assert.h>
 #define CHIPS_ASSERT(expr) (assert(expr))
 #endif
 
+#ifndef CHIPS_NO_LIBC_STRING
+#include <string.h>  // IWYU pragma: keep
+#endif
+
 #ifndef CHIPS_CRC16_KERMIT_FOLD
-#define CHIPS_CRC16_KERMIT_FOLD (16u)
+#define CHIPS_CRC16_KERMIT_FOLD (1u)
 #endif
 
-#ifndef CHIPS_SLAVE_RX_CHUNK
-#define CHIPS_SLAVE_RX_CHUNK (256u)
-#endif
-
-#ifndef CHIPS_MASTER_RX_CHUNK
-#define CHIPS_MASTER_RX_CHUNK (256u)
+#ifndef CHIPS_RX_CHUNK
+#define CHIPS_RX_CHUNK (256u)
 #endif
 
 #ifdef __cplusplus
@@ -94,25 +99,11 @@ extern "C" {
 /** Worst-case encoded size of any frame. */
 #define CHIPS_WIRE_MAX CHIPS_WIRE_SIZE(CHIPS_MAX_PAYLOAD)
 
-/** Longest duration accepted anywhere in the API, in µs (about 35 minutes). */
-#define CHIPS_TIME_MAX_US (0x7FFFFFFFu)
+/** Nanoseconds per second; every valid #chips_time_t has tv_nsec below this. */
+#define CHIPS_NSEC_PER_SEC (1000000000u)
 
-/** Delay between the starts of two copies of a request, in µs (1 s). */
-#define CHIPS_RESEND_PERIOD_US (1000000u)
-
-/** How long the master waits for a response, in µs (3 s). */
-#define CHIPS_TIMEOUT_US (3000000u)
-
-/** How long the slave replays a cached response, in µs (4 s). */
-#define CHIPS_CACHE_WINDOW_US (4000000u)
-
-#if CHIPS_CACHE_WINDOW_US <= CHIPS_TIMEOUT_US
-#error "CHIPS_CACHE_WINDOW_US must exceed CHIPS_TIMEOUT_US"
-#endif
-#if CHIPS_RESEND_PERIOD_US == 0u || CHIPS_RESEND_PERIOD_US > CHIPS_TIME_MAX_US || CHIPS_TIMEOUT_US == 0u || \
-    CHIPS_TIMEOUT_US > CHIPS_TIME_MAX_US || CHIPS_CACHE_WINDOW_US > CHIPS_TIME_MAX_US
-#error "CHIPS timing constants must be in 1..CHIPS_TIME_MAX_US"
-#endif
+/** Longest duration accepted anywhere in the API, in whole seconds (about 68 years). */
+#define CHIPS_TIME_MAX_SEC (0x7FFFFFFFu)
 
 /* ------------------------------------------------------------------------- */
 /* CRC-16/Kermit                                                             */
@@ -190,7 +181,7 @@ typedef struct {
     uint8_t cmd;                 /**< Command identifier. */
     const uint8_t* payload;      /**< Payload data. */
     size_t payload_len;          /**< Payload length in bytes. */
-    uint16_t crc;                /**< Kermit 16 crc */
+    uint16_t crc;                /**< CRC-16/Kermit received with the frame. */
 } chips_frame_t;
 
 /** @brief Decoder receive state. @internal */
@@ -209,7 +200,7 @@ typedef struct {
     uint8_t* payload;               /**< User-supplied payload buffer. */
     size_t len;                     /**< Bytes received in current frame. */
     uint8_t hdr[CHIPS_HEADER_SIZE]; /**< Received header bytes. */
-    uint8_t spill[CHIPS_CRC_SIZE];  /**< Trailing bytes held back as CRC candidates. */
+    uint8_t spill[CHIPS_CRC_SIZE];  /**< Frame bytes past header + #CHIPS_MAX_PAYLOAD: CRC of a full-size frame. */
     chips_rx_state_t state;         /**< Receive state. */
 } chips_decoder_t;
 
@@ -278,6 +269,102 @@ chips_dec_status_t chips_decode(chips_decoder_t* dec,
                                 size_t in_len,
                                 size_t* consumed,
                                 chips_frame_t* frame);
+
+/* ------------------------------------------------------------------------- */
+/* Time                                                                      */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * @brief A time in seconds and nanoseconds, like POSIX struct timespec.
+ *
+ * Used both for clock readings (chips_port_t::now) and for durations. A
+ * clock reading's tv_sec may wrap at 2^32; durations between two readings
+ * are taken modulo 2^32 s, so the wrap is harmless. Durations passed to the
+ * API must not exceed #CHIPS_TIME_MAX_SEC seconds.
+ */
+typedef struct {
+    uint32_t tv_sec;  /**< Seconds. */
+    uint32_t tv_nsec; /**< Nanoseconds; below #CHIPS_NSEC_PER_SEC. */
+} chips_time_t;
+
+/** @brief true if @p t has tv_nsec below #CHIPS_NSEC_PER_SEC. */
+bool chips_time_valid(chips_time_t t);
+
+/**
+ * @brief Wrapping-safe difference @p now − @p since.
+ *
+ * @param now   Clock reading; valid.
+ * @param since Earlier clock reading; valid.
+ *
+ * @return The elapsed time, with tv_sec taken modulo 2^32.
+ */
+chips_time_t chips_time_sub(chips_time_t now, chips_time_t since);
+
+/**
+ * @brief Compare two durations.
+ *
+ * @return Negative, zero or positive as @p a is shorter than, equal to or
+ *         longer than @p b.
+ */
+int chips_time_cmp(chips_time_t a, chips_time_t b);
+
+/* ------------------------------------------------------------------------- */
+/* Timing                                                                    */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * @brief Retransmission timing, shared by a master and its slave.
+ *
+ * These are RESEND_PERIOD and MAX_RESENDS of docs/PROTOCOL.md §3, which
+ * defines resend slots, the deadline and the slave's cache window. Configure
+ * both sides with the same values.
+ */
+typedef struct {
+    chips_time_t resend_period; /**< Slot length; at least one round trip, see chips_uart_resend_period(). */
+    uint8_t max_resends;        /**< Copies allowed after the first; 0 sends the request once. */
+} chips_timing_t;
+
+/**
+ * @brief Check a timing configuration.
+ *
+ * @return true if @p timing is non-NULL, @p resend_period is valid and
+ *         nonzero, and chips_timing_cache_window() does not exceed
+ *         #CHIPS_TIME_MAX_SEC seconds.
+ */
+bool chips_timing_valid(const chips_timing_t* timing);
+
+/**
+ * @brief CACHE_WINDOW of docs/PROTOCOL.md §3:
+ *        (max_resends + 2) × resend_period.
+ *
+ * @param timing Valid configuration (see chips_timing_valid()).
+ */
+chips_time_t chips_timing_cache_window(const chips_timing_t* timing);
+
+/** @brief Character format of a UART link. */
+typedef struct {
+    uint32_t baud;     /**< Bit rate in bit/s; nonzero. */
+    uint8_t data_bits; /**< Data bits per character; at least 8. */
+    bool parity;       /**< A parity bit is sent. */
+    uint8_t stop_bits; /**< 1 or 2 (round 1.5 up to 2). */
+} chips_uart_params_t;
+
+/**
+ * @brief Smallest safe resend period for a UART link.
+ *
+ * The formula of docs/PROTOCOL.md §3.1: one worst-case round trip (a request
+ * and a response of #CHIPS_WIRE_MAX bytes each, one start bit and the
+ * configured data, parity and stop bits per byte) plus @p app_latency.
+ *
+ * @param uart        Link parameters.
+ * @param app_latency Everything that is not time on the wire: the slave's
+ *                    worst-case handling time, the step periods of both
+ *                    sides, and driver or FIFO delays. Valid.
+ *
+ * @return The period, rounded up to the next nanosecond and capped at
+ *         #CHIPS_TIME_MAX_SEC seconds.
+ */
+chips_time_t chips_uart_resend_period(const chips_uart_params_t* uart, chips_time_t app_latency);
 
 #ifdef __cplusplus
 }

@@ -5,7 +5,6 @@
 
 #include "chips/core.h"
 
-#include "compiler.h"
 #include "crc16_kermit_tables.h"
 
 uint16_t chips_crc16_kermit_compute(const uint8_t* data, size_t length, uint16_t crc) {
@@ -448,4 +447,70 @@ chips_dec_status_t chips_decode(chips_decoder_t* dec,
     CHIPS_ASSERT(st != CHIPS_DEC_NEED_MORE || *consumed == in_len);
 
     return st;
+}
+
+#define TIME_MAX_NS ((uint64_t)CHIPS_TIME_MAX_SEC * CHIPS_NSEC_PER_SEC)
+
+static uint64_t to_ns(chips_time_t t) {
+    return (uint64_t)t.tv_sec * CHIPS_NSEC_PER_SEC + t.tv_nsec;
+}
+
+static chips_time_t from_ns(uint64_t ns) {
+    chips_time_t t;
+    t.tv_sec = (uint32_t)(ns / CHIPS_NSEC_PER_SEC);
+    t.tv_nsec = (uint32_t)(ns % CHIPS_NSEC_PER_SEC);
+    return t;
+}
+
+bool chips_time_valid(chips_time_t t) {
+    return t.tv_nsec < CHIPS_NSEC_PER_SEC;
+}
+
+chips_time_t chips_time_sub(chips_time_t now, chips_time_t since) {
+    CHIPS_ASSERT(chips_time_valid(now) && chips_time_valid(since));
+
+    chips_time_t d;
+    d.tv_sec = (uint32_t)(now.tv_sec - since.tv_sec);
+    if (now.tv_nsec >= since.tv_nsec) {
+        d.tv_nsec = now.tv_nsec - since.tv_nsec;
+    } else {
+        d.tv_sec = (uint32_t)(d.tv_sec - 1u);
+        d.tv_nsec = now.tv_nsec + (CHIPS_NSEC_PER_SEC - since.tv_nsec);
+    }
+    return d;
+}
+
+int chips_time_cmp(chips_time_t a, chips_time_t b) {
+    if (a.tv_sec != b.tv_sec) {
+        return (a.tv_sec < b.tv_sec) ? -1 : 1;
+    }
+    if (a.tv_nsec != b.tv_nsec) {
+        return (a.tv_nsec < b.tv_nsec) ? -1 : 1;
+    }
+    return 0;
+}
+
+bool chips_timing_valid(const chips_timing_t* timing) {
+    if (timing == NULL || !chips_time_valid(timing->resend_period)) {
+        return false;
+    }
+    const uint64_t period = to_ns(timing->resend_period);
+    return period != 0u && period <= TIME_MAX_NS / ((uint64_t)timing->max_resends + 2u);
+}
+
+chips_time_t chips_timing_cache_window(const chips_timing_t* timing) {
+    CHIPS_ASSERT(chips_timing_valid(timing));
+    return from_ns(((uint64_t)timing->max_resends + 2u) * to_ns(timing->resend_period));
+}
+
+chips_time_t chips_uart_resend_period(const chips_uart_params_t* uart, chips_time_t app_latency) {
+    CHIPS_ASSERT(uart != NULL);
+    CHIPS_ASSERT(uart->baud > 0u && uart->data_bits >= 8u && uart->stop_bits >= 1u && uart->stop_bits <= 2u);
+    CHIPS_ASSERT(chips_time_valid(app_latency));
+
+    const uint64_t bits_per_byte = 1u + (uint64_t)uart->data_bits + (uart->parity ? 1u : 0u) + uart->stop_bits;
+    const uint64_t bits = 2u * (uint64_t)CHIPS_WIRE_MAX * bits_per_byte;
+    const uint64_t wire_ns = (bits * CHIPS_NSEC_PER_SEC + uart->baud - 1u) / uart->baud;
+    const uint64_t total = wire_ns + to_ns(app_latency);
+    return from_ns(total > TIME_MAX_NS ? TIME_MAX_NS : total);
 }

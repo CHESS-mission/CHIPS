@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "chips/core.h"
+#include "test_util.hpp"
 
 namespace {
 
@@ -444,6 +445,130 @@ TEST_F(CoreTest, ResetReturnsDiscardedLength) {
 TEST_F(CoreTest, InitWithNullDecoderIsNoOp) {
     chips_decoder_init(nullptr, m_payload_buf);
     SUCCEED();
+}
+
+chips_uart_params_t Uart(uint32_t baud, uint8_t data_bits, bool parity, uint8_t stop_bits) {
+    chips_uart_params_t u{};
+    u.baud = baud;
+    u.data_bits = data_bits;
+    u.parity = parity;
+    u.stop_bits = stop_bits;
+    return u;
+}
+
+chips_timing_t Timing(chips_time_t period, uint8_t max_resends) {
+    chips_timing_t t{};
+    t.resend_period = period;
+    t.max_resends = max_resends;
+    return t;
+}
+
+using chips_test::Ms;
+using chips_test::Ns;
+
+constexpr chips_time_t Sec(uint32_t s) {
+    return chips_time_t{s, 0u};
+}
+
+TEST(Time, ValidRequiresNsecBelowOneSecond) {
+    EXPECT_TRUE(chips_time_valid(chips_time_t{0u, 0u}));
+    EXPECT_TRUE(chips_time_valid(chips_time_t{UINT32_MAX, CHIPS_NSEC_PER_SEC - 1u}));
+    EXPECT_FALSE(chips_time_valid(chips_time_t{0u, CHIPS_NSEC_PER_SEC}));
+    EXPECT_FALSE(chips_time_valid(chips_time_t{0u, UINT32_MAX}));
+}
+
+TEST(Time, SubBorrowsFromSeconds) {
+    EXPECT_EQ(Ms(1500), chips_time_sub(Ms(2500), Ms(1000)));
+    EXPECT_EQ(Ns(1), chips_time_sub(Sec(3), chips_time_t{2u, CHIPS_NSEC_PER_SEC - 1u}));
+    EXPECT_EQ(Ms(0), chips_time_sub(Ms(1234), Ms(1234)));
+}
+
+TEST(Time, SubWrapsAtTwoToThe32Seconds) {
+    const chips_time_t before = {UINT32_MAX, 900000000u};
+    EXPECT_EQ(Ms(200), chips_time_sub(Ms(100), before));
+    EXPECT_EQ(Sec(2), chips_time_sub(Sec(1), Sec(UINT32_MAX)));
+}
+
+TEST(Time, CmpOrdersBySecondsThenNanoseconds) {
+    EXPECT_EQ(0, chips_time_cmp(Ms(1500), Ms(1500)));
+    EXPECT_LT(chips_time_cmp(Ms(1500), Ms(1500) + Ns(1)), 0);
+    EXPECT_GT(chips_time_cmp(Ms(1500) + Ns(1), Ms(1500)), 0);
+    EXPECT_LT(chips_time_cmp(chips_time_t{1u, CHIPS_NSEC_PER_SEC - 1u}, Sec(2)), 0);
+    EXPECT_GT(chips_time_cmp(Sec(2), chips_time_t{1u, CHIPS_NSEC_PER_SEC - 1u}), 0);
+}
+
+TEST(Timing, ValidRejectsNullZeroPeriodAndOverflow) {
+    EXPECT_FALSE(chips_timing_valid(nullptr));
+
+    const chips_timing_t zero = Timing(Ms(0), 2);
+    EXPECT_FALSE(chips_timing_valid(&zero));
+
+    const chips_timing_t shortest = Timing(Ns(1), 255);
+    EXPECT_TRUE(chips_timing_valid(&shortest));
+
+    const chips_timing_t bad_nsec = Timing(chips_time_t{1u, CHIPS_NSEC_PER_SEC}, 0);
+    EXPECT_FALSE(chips_timing_valid(&bad_nsec));
+
+    /* 2 x period must not exceed CHIPS_TIME_MAX_SEC (odd): half of it is x.5 s. */
+    const chips_timing_t largest = Timing(chips_time_t{CHIPS_TIME_MAX_SEC / 2u, CHIPS_NSEC_PER_SEC / 2u}, 0);
+    EXPECT_TRUE(chips_timing_valid(&largest));
+
+    const chips_timing_t too_long = Timing(largest.resend_period + Ns(1), 0);
+    EXPECT_FALSE(chips_timing_valid(&too_long));
+
+    const chips_timing_t too_many = Timing(Sec(CHIPS_TIME_MAX_SEC / 256u), 255);
+    EXPECT_FALSE(chips_timing_valid(&too_many));
+
+    const chips_timing_t huge = Timing(Sec(UINT32_MAX), 255);
+    EXPECT_FALSE(chips_timing_valid(&huge));
+}
+
+TEST(Timing, CacheWindowCoversEveryResendPlusOnePeriod) {
+    const chips_timing_t t = Timing(Ms(1000), 2);
+    EXPECT_EQ(Ms(4000), chips_timing_cache_window(&t));
+
+    const chips_timing_t once = Timing(Ms(250), 0);
+    EXPECT_EQ(Ms(500), chips_timing_cache_window(&once));
+
+    const chips_timing_t many = Timing(Ms(10), 255);
+    EXPECT_EQ(Ms(2570), chips_timing_cache_window(&many));
+
+    const chips_timing_t carry = Timing(chips_time_t{1u, CHIPS_NSEC_PER_SEC - 1u}, 0);
+    EXPECT_EQ((chips_time_t{3u, CHIPS_NSEC_PER_SEC - 2u}), chips_timing_cache_window(&carry));
+}
+
+TEST(Timing, UartPeriodIsTwoWorstCaseFramesPlusLatency) {
+    /* 8N1: 10 bits per byte, 2 x 2058 bytes = 41160 bits; 41160 / 115200 s rounds up to 357291667 ns. */
+    const chips_uart_params_t fast = Uart(115200u, 8, false, 1);
+    EXPECT_EQ(Ns(357291667u), chips_uart_resend_period(&fast, Ms(0)));
+    EXPECT_EQ(Ns(357291667u) + Ms(5), chips_uart_resend_period(&fast, Ms(5)));
+
+    /* 8E2: 12 bits per byte, 49392 bits: exactly 5.145 s at 9600 baud. */
+    const chips_uart_params_t slow = Uart(9600u, 8, true, 2);
+    EXPECT_EQ(Ms(5145), chips_uart_resend_period(&slow, Ms(0)));
+}
+
+TEST(Timing, UartPeriodMatchesWireSizeFormula) {
+    const chips_uart_params_t u = Uart(1000u, 9, true, 1);
+    const uint64_t bits = 2u * CHIPS_WIRE_MAX * (1u + 9u + 1u + 1u);
+    EXPECT_EQ(Ms(bits), chips_uart_resend_period(&u, Ms(0)));
+}
+
+TEST(Timing, UartPeriodSaturates) {
+    const chips_uart_params_t crawl = Uart(1u, 8, false, 1);
+    EXPECT_EQ(Sec(41160u), chips_uart_resend_period(&crawl, Ms(0)));
+    EXPECT_EQ(Sec(CHIPS_TIME_MAX_SEC), chips_uart_resend_period(&crawl, Sec(CHIPS_TIME_MAX_SEC - 41160u) + Ns(1)));
+
+    const chips_uart_params_t fast = Uart(115200u, 8, false, 1);
+    EXPECT_EQ(Sec(CHIPS_TIME_MAX_SEC), chips_uart_resend_period(&fast, Sec(CHIPS_TIME_MAX_SEC)));
+    EXPECT_EQ(Sec(CHIPS_TIME_MAX_SEC),
+              chips_uart_resend_period(&fast, chips_time_t{UINT32_MAX, CHIPS_NSEC_PER_SEC - 1u}));
+}
+
+TEST(Timing, UartPeriodGivesValidTiming) {
+    const chips_uart_params_t u = Uart(115200u, 8, false, 1);
+    const chips_timing_t t = Timing(chips_uart_resend_period(&u, Ms(10)), 3);
+    EXPECT_TRUE(chips_timing_valid(&t));
 }
 
 }  // namespace

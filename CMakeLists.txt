@@ -56,8 +56,9 @@ endfunction()
 
 chips_add_library(chips_core SOURCES src/core.c)
 target_include_directories(chips_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-chips_add_library(chips_master SOURCES src/master.c DEPENDS chips_core)
-chips_add_library(chips_slave SOURCES src/slave.c DEPENDS chips_core)
+chips_add_library(chips_link SOURCES src/link.c DEPENDS chips_core)
+chips_add_library(chips_master SOURCES src/master.c DEPENDS chips_link)
+chips_add_library(chips_slave SOURCES src/slave.c DEPENDS chips_link)
 
 if(CHIPS_BUILD_TESTS)
     enable_language(CXX)

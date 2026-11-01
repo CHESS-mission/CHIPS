@@ -12,20 +12,76 @@
 #include <array>
 #include <cstdint>
 #include <deque>
+#include <iomanip>
 #include <limits>
-#include <utility>
+#include <ostream>
 #include <vector>
 
 #include "chips/core.h"
 #include "chips/port.h"
 
+constexpr uint64_t ToNs(chips_time_t t) {
+    return static_cast<uint64_t>(t.tv_sec) * CHIPS_NSEC_PER_SEC + t.tv_nsec;
+}
+
+constexpr chips_time_t FromNs(uint64_t ns) {
+    return chips_time_t{static_cast<uint32_t>(ns / CHIPS_NSEC_PER_SEC), static_cast<uint32_t>(ns % CHIPS_NSEC_PER_SEC)};
+}
+
+constexpr chips_time_t operator+(chips_time_t a, chips_time_t b) {
+    return FromNs(ToNs(a) + ToNs(b));
+}
+
+constexpr chips_time_t operator-(chips_time_t a, chips_time_t b) {
+    return (a.tv_nsec >= b.tv_nsec) ? chips_time_t{static_cast<uint32_t>(a.tv_sec - b.tv_sec), a.tv_nsec - b.tv_nsec}
+                                    : chips_time_t{static_cast<uint32_t>(a.tv_sec - b.tv_sec - 1u),
+                                                   a.tv_nsec + CHIPS_NSEC_PER_SEC - b.tv_nsec};
+}
+
+constexpr chips_time_t operator*(uint64_t k, chips_time_t t) {
+    return FromNs(k * ToNs(t));
+}
+
+inline chips_time_t& operator+=(chips_time_t& a, chips_time_t b) {
+    return a = a + b;
+}
+
+constexpr bool operator==(chips_time_t a, chips_time_t b) {
+    return a.tv_sec == b.tv_sec && a.tv_nsec == b.tv_nsec;
+}
+
+constexpr bool operator!=(chips_time_t a, chips_time_t b) {
+    return !(a == b);
+}
+
+inline std::ostream& operator<<(std::ostream& os, chips_time_t t) {
+    return os << t.tv_sec << '.' << std::setw(9) << std::setfill('0') << t.tv_nsec << std::setfill(' ') << 's';
+}
+
 namespace chips_test {
+
+constexpr chips_time_t Ns(uint64_t ns) {
+    return FromNs(ns);
+}
+
+constexpr chips_time_t Ms(uint64_t ms) {
+    return FromNs(ms * 1000000u);
+}
 
 using Bytes = std::vector<uint8_t>;
 
-using IoStatus = decltype(std::declval<chips_port_t>().write(nullptr, nullptr, 0, nullptr));
+constexpr chips_time_t K_RESEND_PERIOD = Ms(1000u);
+constexpr uint8_t K_MAX_RESENDS = 2u;
 
-inline const IoStatus k_io_fail = static_cast<IoStatus>(static_cast<int>(CHIPS_IO_OK) + 1);
+constexpr chips_time_t K_TIMEOUT = (K_MAX_RESENDS + 1u) * K_RESEND_PERIOD;
+constexpr chips_time_t K_CACHE_WINDOW = (K_MAX_RESENDS + 2u) * K_RESEND_PERIOD;
+
+inline chips_timing_t TestTiming() {
+    chips_timing_t t{};
+    t.resend_period = K_RESEND_PERIOD;
+    t.max_resends = K_MAX_RESENDS;
+    return t;
+}
 
 inline bool Has(uint32_t ev, uint32_t flag) {
     return (ev & flag) != 0;
@@ -79,7 +135,7 @@ inline bool ReplaceFirst(Bytes& b, uint8_t from, uint8_t to) {
 }
 
 struct FakePort {
-    uint32_t now = 0;
+    chips_time_t now{};
 
     std::deque<uint8_t> rx;
     Bytes tx;
@@ -100,16 +156,16 @@ struct FakePort {
         p.ctx = this;
         p.write = &FakePort::Write;
         p.read = &FakePort::Read;
-        p.now_us = &FakePort::Now;
+        p.now = &FakePort::Now;
         return p;
     }
 
-    static IoStatus Write(void* ctx, const uint8_t* buf, size_t len, size_t* written) {
+    static chips_io_status_t Write(void* ctx, const uint8_t* buf, size_t len, size_t* written) {
         auto* self = static_cast<FakePort*>(ctx);
         self->write_calls++;
         *written = 0;
         if (self->fail_write) {
-            return k_io_fail;
+            return CHIPS_IO_ERROR;
         }
         const size_t n = std::min(len, self->max_write);
         self->tx.insert(self->tx.end(), buf, buf + n);
@@ -117,12 +173,12 @@ struct FakePort {
         return CHIPS_IO_OK;
     }
 
-    static IoStatus Read(void* ctx, uint8_t* buf, size_t cap, size_t* n) {
+    static chips_io_status_t Read(void* ctx, uint8_t* buf, size_t cap, size_t* n) {
         auto* self = static_cast<FakePort*>(ctx);
         self->read_calls++;
         *n = 0;
         if (self->fail_read) {
-            return k_io_fail;
+            return CHIPS_IO_ERROR;
         }
         const size_t k = std::min(cap, std::min(self->max_read, self->rx.size()));
         for (size_t i = 0; i < k; ++i) {
@@ -133,7 +189,7 @@ struct FakePort {
         return CHIPS_IO_OK;
     }
 
-    static uint32_t Now(void* ctx) { return static_cast<FakePort*>(ctx)->now; }
+    static chips_time_t Now(void* ctx) { return static_cast<FakePort*>(ctx)->now; }
 };
 
 struct EventTally {

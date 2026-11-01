@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 #include "chips/core.h"
+#include "chips/link.h"
 #include "chips/port.h"
 
 #ifdef __cplusplus
@@ -31,14 +32,14 @@ typedef enum {
 /** @brief Event bits returned by chips_slave_step(). */
 enum {
     CHIPS_SLAVE_EV_NONE = 0u,
-    CHIPS_SLAVE_EV_REQUEST = 1u << 0,      /**< New request pending; see chips_slave_request(). */
-    CHIPS_SLAVE_EV_TX_FRAME = 1u << 1,     /**< A full copy of a response reached the port. */
-    CHIPS_SLAVE_EV_RETRANSMIT = 1u << 2,   /**< Duplicate request answered from the cache. */
-    CHIPS_SLAVE_EV_TX_ERROR = 1u << 3,     /**< Port write failed; that copy is abandoned. Part of it may
-                                                already be on the line. */
-    CHIPS_SLAVE_EV_RX_ERROR = 1u << 4,     /**< Port read failed; partial frame discarded. */
-    CHIPS_SLAVE_EV_RX_BAD_FRAME = 1u << 5, /**< Decoder rejected a frame (escape, length, CRC). */
-    CHIPS_SLAVE_EV_RX_IGNORED = 1u << 6    /**< Valid frame not acted on (busy, pending copy, response). */
+    CHIPS_SLAVE_EV_REQUEST = 1u << 0,                         /**< New request pending; see chips_slave_request(). */
+    CHIPS_SLAVE_EV_TX_FRAME = CHIPS_LINK_EV_TX_FRAME,         /**< A full copy of a response reached the port. */
+    CHIPS_SLAVE_EV_TX_ERROR = CHIPS_LINK_EV_TX_ERROR,         /**< Port write failed; that copy is abandoned. Part
+                                                                   of it may already be on the line. */
+    CHIPS_SLAVE_EV_RX_ERROR = CHIPS_LINK_EV_RX_ERROR,         /**< Port read failed; partial frame discarded. */
+    CHIPS_SLAVE_EV_RX_BAD_FRAME = CHIPS_LINK_EV_RX_BAD_FRAME, /**< Decoder rejected a frame (escape, length, CRC). */
+    CHIPS_SLAVE_EV_RETRANSMIT = 1u << 5,                      /**< Duplicate request answered from the cache. */
+    CHIPS_SLAVE_EV_RX_IGNORED = 1u << 6 /**< Valid frame not acted on (pending request, copy in flight, response). */
 };
 
 /**
@@ -81,33 +82,23 @@ typedef struct {
  * Treat as opaque; access only through the functions below.
  */
 typedef struct {
-    /* Binding */
-    chips_port_t port;
-
-    /* State */
-    chips_slave_state_t state;
-    uint32_t now; /**< Time sampled by the latest step. */
-
-    /* Pending request (valid in PENDING); its payload lives in rx_payload. */
-    chips_slave_fingerprint_t pending;
-    chips_slave_request_t request;
-
-    /* Response cache: a copy is in flight while tx_off < tx_len. */
+    /* Response cache: tx_frame of the link holds the cached response. */
+    chips_link_t link;
+    chips_time_t cache_window; /**< From chips_timing_cache_window(). */
     bool cache_valid;
     chips_slave_fingerprint_t cached;
-    uint32_t t_cached; /**< Time when the response was queued. */
-    size_t tx_len;
-    size_t tx_off;
-    uint8_t tx_frame[CHIPS_WIRE_MAX];
+    chips_time_t t_cached; /**< Time when the response was queued. */
+
+    /* Pending request (valid in PENDING); its payload lives in rx_payload. */
+    chips_slave_state_t state;
+    chips_slave_request_t request;
+    uint16_t request_crc; /**< Completes the request's fingerprint. */
 
     /*
-     * Rx. Double buffer: the decoder writes into rx_payload[rx_active]. On
+     * Rx double buffer: the decoder writes into rx_payload[rx_active]. On
      * delivery, that half becomes the pending request's payload and the
      * decoder moves to the other half.
      */
-    chips_decoder_t dec;
-    chips_frame_t frame;
-    uint8_t rx_chunk[CHIPS_SLAVE_RX_CHUNK];
     uint8_t rx_payload[2][CHIPS_MAX_PAYLOAD];
     uint8_t rx_active;
 } chips_slave_t;
@@ -119,10 +110,13 @@ typedef struct {
 /**
  * @brief Initialize an instance. Clears all state and the cache.
  *
- * @param s    Instance.
- * @param port Port; copied. All three functions must be non-NULL.
+ * @param s      Instance.
+ * @param port   Port; copied. All three functions must be non-NULL.
+ * @param timing The master's resend period and count; must satisfy
+ *               chips_timing_valid(). Only the cache window derived from it
+ *               (chips_timing_cache_window()) is kept.
  */
-void chips_slave_init(chips_slave_t* s, const chips_port_t* port);
+void chips_slave_init(chips_slave_t* s, const chips_port_t* port, const chips_timing_t* timing);
 
 /**
  * @brief Advance the state machine by one tick.
@@ -188,4 +182,4 @@ chips_slave_state_t chips_slave_state(const chips_slave_t* s);
 }
 #endif
 
-#endif
+#endif /* CHIPS_SLAVE_H */

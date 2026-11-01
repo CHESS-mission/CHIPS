@@ -26,7 +26,7 @@ typedef struct {
     uint8_t rx[512];
     size_t rx_len;
     size_t rx_pos;
-    uint32_t t_us;
+    chips_time_t now;
 } sim_t;
 
 static chips_io_status_t sim_read(void* ctx, uint8_t* buf, size_t cap, size_t* nread) {
@@ -56,8 +56,8 @@ static chips_io_status_t sim_write(void* ctx, const uint8_t* data, size_t len, s
     return CHIPS_IO_OK;
 }
 
-static uint32_t sim_now_us(void* ctx) {
-    return ((sim_t*)ctx)->t_us;
+static chips_time_t sim_now(void* ctx) {
+    return ((sim_t*)ctx)->now;
 }
 
 static size_t script(sim_t* sim, uint8_t seq, uint8_t cmd, const char* text) {
@@ -131,15 +131,17 @@ int main(void) {
     const chips_port_t port = {
         .write = sim_write,
         .read = sim_read,
-        .now_us = sim_now_us,
+        .now = sim_now,
         .ctx = &sim,
     };
-    chips_slave_init(&slave, &port);
+    const chips_timing_t timing = {.resend_period = {.tv_nsec = 50000000u}, .max_resends = 2u};
+    chips_slave_init(&slave, &port, &timing);
 
     tally_t t = {0};
 
     for (unsigned step = 1; step <= 200; step++) {
-        sim.t_us += 1000u;
+        /* 1 ms per step; 200 steps never carry into tv_sec. */
+        sim.now.tv_nsec += 1000000u;
 
         uint32_t ev = chips_slave_step(&slave);
         if (ev != CHIPS_SLAVE_EV_NONE) {
