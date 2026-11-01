@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 #include "chips/core.h"
+#include "chips/link.h"
 #include "chips/port.h"
 
 #ifdef __cplusplus
@@ -29,13 +30,13 @@ typedef enum {
 } chips_submit_status_t;
 
 /**
- * @brief How a transaction ended, as seen by the master.
+ * @brief How a transaction ended, as seen by the master (docs/PROTOCOL.md §4.3).
  *
  * Only a response frame whose sequence and command both match the request
  * ends a transaction early. Every other decoded frame is ignored and reported
  * through an event bit (#CHIPS_EV_RX_REQUEST, #CHIPS_EV_RX_STALE,
  * #CHIPS_EV_RX_CMD_MISMATCH), and the master keeps listening until the
- * deadline.
+ * deadline (docs/PROTOCOL.md §4.2).
  *
  * Only OK says anything about the slave.
  */
@@ -65,7 +66,7 @@ enum {
     CHIPS_EV_NONE = 0u,
     CHIPS_EV_DONE = 1u << 0,           /**< Transaction finished; see chips_master_result(). */
     CHIPS_EV_TX_FRAME = 1u << 1,       /**< A full copy of the request reached the port. */
-    CHIPS_EV_TX_ERROR = 1u << 2,       /**< Port write failed; copy abandoned until next resend. Part of it
+    CHIPS_EV_TX_ERROR = 1u << 2,       /**< Port write failed; copy abandoned until next resend slot. Part of it
                                             may already be on the line. */
     CHIPS_EV_RX_ERROR = 1u << 3,       /**< Port read failed; partial frame discarded. */
     CHIPS_EV_RX_BAD_FRAME = 1u << 4,   /**< Decoder rejected a frame (escape, length, CRC). */
@@ -88,8 +89,8 @@ typedef struct {
      * once the transaction has ended.
      */
     const uint8_t* payload;
-    size_t payload_len;  /**< Response payload length when OK, else 0. */
-    uint32_t latency_us; /**< First step to completion; 0 if cancelled before the first step. */
+    size_t payload_len;   /**< Response payload length when OK, else 0. */
+    chips_time_t latency; /**< First step to completion; 0 if cancelled before the first step. */
 } chips_master_result_t;
 
 /* ------------------------------------------------------------------------- */
@@ -109,34 +110,23 @@ typedef enum {
  * Fields are visible only so the instance can be allocated statically.
  * Treat as opaque and use the functions below.
  *
- * The instance owns its transmit frame and receive chunk. It does not own
- * any response buffer: each chips_master_submit() lends one for the duration
- * of that transaction only (see chips_master_submit()).
+ * The instance owns its link (transmit frame and receive chunk). It does not
+ * own any response buffer: each chips_master_submit() lends one for the
+ * duration of that transaction only (see chips_master_submit()).
  */
 typedef struct {
-    /* Binding */
-    chips_port_t port;
+    chips_link_t link; /**< The decoder writes into the response buffer of the current submit. */
+    chips_timing_t timing;
 
     /* Transaction */
     chips_master_state_t state;
     uint8_t seq;
     uint8_t cmd;
-    uint32_t t_start;     /**< Time of the first step. */
-    uint32_t t_last_send; /**< Start time of the latest copy. */
-    bool tx_started;      /**< At least one copy was started. */
+    chips_time_t t_start; /**< Time of the first step. */
+    chips_time_t t_slot;  /**< Start time of the current resend slot. */
+    uint8_t resends;      /**< Resend slots used, including any that found a copy still being written. */
     bool sent_ok;         /**< At least one copy was fully written. */
 
-    /* Tx: a copy is in flight while tx_off < tx_len. */
-    size_t tx_len;
-    size_t tx_off;
-    uint8_t tx_frame[CHIPS_WIRE_MAX];
-
-    /* Rx: the decoder writes into the response buffer of the current submit. */
-    chips_decoder_t dec;
-    chips_frame_t frame;
-    uint8_t rx_chunk[CHIPS_MASTER_RX_CHUNK];
-
-    /* Output */
     chips_master_result_t result;
 } chips_master_t;
 
@@ -151,10 +141,12 @@ typedef struct {
  * flight is then abandoned without I/O and its response buffer released.
  * As with chips_master_cancel(), the slave may still execute it.
  *
- * @param m    Instance.
- * @param port Port; copied. All three functions must be non-NULL.
+ * @param m      Instance.
+ * @param port   Port; copied. All three functions must be non-NULL.
+ * @param timing Resend period and count; copied. Must satisfy
+ *               chips_timing_valid(), and should match the slave's.
  */
-void chips_master_init(chips_master_t* m, const chips_port_t* port);
+void chips_master_init(chips_master_t* m, const chips_port_t* port, const chips_timing_t* timing);
 
 /**
  * @brief Queue a request. No I/O happens until the next step.
@@ -179,7 +171,8 @@ void chips_master_init(chips_master_t* m, const chips_port_t* port);
  *    they are unspecified.
  *  - Once the transaction has ended, the buffer is the application's again.
  *
- * The transaction times out #CHIPS_TIMEOUT_US after the first step.
+ * The request is sent on the first step and resent as described in
+ * docs/PROTOCOL.md §4.2.
  *
  * @param m            Instance.
  * @param cmd          Command; at most #CHIPS_CMD_MASK.

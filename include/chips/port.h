@@ -14,6 +14,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "chips/core.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -44,8 +46,11 @@ typedef struct {
      */
     chips_io_status_t (*read)(void* ctx, uint8_t* buf, size_t cap, size_t* nread);
 
-    /** Monotonic microseconds; may wrap at 2^32. */
-    uint32_t (*now_us)(void* ctx);
+    /**
+     * Monotonic time, e.g. CLOCK_MONOTONIC truncated to 32-bit seconds.
+     * tv_nsec must be below #CHIPS_NSEC_PER_SEC; tv_sec may wrap at 2^32.
+     */
+    chips_time_t (*now)(void* ctx);
 
     /** Passed unchanged to the functions above. */
     void* ctx;

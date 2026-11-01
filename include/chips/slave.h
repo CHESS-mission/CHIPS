@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 #include "chips/core.h"
+#include "chips/link.h"
 #include "chips/port.h"
 
 #ifdef __cplusplus
@@ -81,33 +82,23 @@ typedef struct {
  * Treat as opaque; access only through the functions below.
  */
 typedef struct {
-    /* Binding */
-    chips_port_t port;
-
-    /* State */
-    chips_slave_state_t state;
-    uint32_t now; /**< Time sampled by the latest step. */
-
-    /* Pending request (valid in PENDING); its payload lives in rx_payload. */
-    chips_slave_fingerprint_t pending;
-    chips_slave_request_t request;
-
-    /* Response cache: a copy is in flight while tx_off < tx_len. */
+    /* Response cache: tx_frame of the link holds the cached response. */
+    chips_link_t link;
+    chips_time_t cache_window; /**< From chips_timing_cache_window(). */
     bool cache_valid;
     chips_slave_fingerprint_t cached;
-    uint32_t t_cached; /**< Time when the response was queued. */
-    size_t tx_len;
-    size_t tx_off;
-    uint8_t tx_frame[CHIPS_WIRE_MAX];
+    chips_time_t t_cached; /**< Time when the response was queued. */
+
+    /* Pending request (valid in PENDING); its payload lives in rx_payload. */
+    chips_slave_state_t state;
+    chips_slave_request_t request;
+    uint16_t request_crc; /**< Completes the request's fingerprint. */
 
     /*
-     * Rx. Double buffer: the decoder writes into rx_payload[rx_active]. On
+     * Rx double buffer: the decoder writes into rx_payload[rx_active]. On
      * delivery, that half becomes the pending request's payload and the
      * decoder moves to the other half.
      */
-    chips_decoder_t dec;
-    chips_frame_t frame;
-    uint8_t rx_chunk[CHIPS_SLAVE_RX_CHUNK];
     uint8_t rx_payload[2][CHIPS_MAX_PAYLOAD];
     uint8_t rx_active;
 } chips_slave_t;
@@ -119,10 +110,13 @@ typedef struct {
 /**
  * @brief Initialize an instance. Clears all state and the cache.
  *
- * @param s    Instance.
- * @param port Port; copied. All three functions must be non-NULL.
+ * @param s      Instance.
+ * @param port   Port; copied. All three functions must be non-NULL.
+ * @param timing The master's resend period and count; must satisfy
+ *               chips_timing_valid(). Only the cache window derived from it
+ *               (chips_timing_cache_window()) is kept.
  */
-void chips_slave_init(chips_slave_t* s, const chips_port_t* port);
+void chips_slave_init(chips_slave_t* s, const chips_port_t* port, const chips_timing_t* timing);
 
 /**
  * @brief Advance the state machine by one tick.

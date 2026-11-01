@@ -51,15 +51,19 @@ static chips_io_status_t fd_write(void* ctx, const uint8_t* data, size_t len, si
     return CHIPS_IO_OK;
 }
 
-static uint32_t mono_us(void* ctx) {
+static chips_time_t mono_now(void* ctx) {
     (void)ctx;
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint32_t)((uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u);
+    return (chips_time_t){.tv_sec = (uint32_t)ts.tv_sec, .tv_nsec = (uint32_t)ts.tv_nsec};
+}
+
+static double ms(chips_time_t t) {
+    return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
 }
 
 static chips_port_t fd_port(int* fd) {
-    return (chips_port_t){.write = fd_write, .read = fd_read, .now_us = mono_us, .ctx = fd};
+    return (chips_port_t){.write = fd_write, .read = fd_read, .now = mono_now, .ctx = fd};
 }
 
 static void nap(void) {
@@ -119,10 +123,16 @@ int main(void) {
     static chips_slave_t sat;
     static uint8_t ground_rx[CHIPS_MAX_PAYLOAD];
 
+    const chips_uart_params_t uart = {.baud = 115200u, .data_bits = 8u, .parity = false, .stop_bits = 1u};
+    const chips_time_t app_latency = {.tv_nsec = 5000000u};
+    const chips_timing_t timing = {.resend_period = chips_uart_resend_period(&uart, app_latency), .max_resends = 3u};
+    printf("resend period %.3f ms, up to %u resends, cache window %.3f ms\n\n", ms(timing.resend_period),
+           (unsigned)timing.max_resends, ms(chips_timing_cache_window(&timing)));
+
     const chips_port_t ground_port = fd_port(&sv[0]);
     const chips_port_t sat_port = fd_port(&sv[1]);
-    chips_master_init(&ground, &ground_port);
-    chips_slave_init(&sat, &sat_port);
+    chips_master_init(&ground, &ground_port, &timing);
+    chips_slave_init(&sat, &sat_port, &timing);
 
     pthread_t sat_tid;
     if (pthread_create(&sat_tid, NULL, sat_thread, &sat) != 0) {
@@ -153,8 +163,7 @@ int main(void) {
         const chips_master_result_t* r = chips_master_result(&ground);
         if (r->outcome == CHIPS_OUTCOME_OK) {
             answered++;
-            printf("sat    > %.*s  (%lu us)\n\n", (int)r->payload_len, (const char*)r->payload,
-                   (unsigned long)r->latency_us);
+            printf("sat    > %.*s  (%.3f ms)\n\n", (int)r->payload_len, (const char*)r->payload, ms(r->latency));
         } else {
             printf("sat    > ... no answer (outcome %d)\n\n", (int)r->outcome);
         }
