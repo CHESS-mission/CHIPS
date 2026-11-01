@@ -16,7 +16,7 @@ static void expire_cache(chips_slave_t* s, chips_time_t now) {
 }
 
 static uint32_t deliver(chips_slave_t* s) {
-    const chips_frame_t* f = &s->link.frame;
+    const chips_frame_t* f = chips_link_frame(&s->link);
     CHIPS_ASSERT(f->payload == s->rx_payload[s->rx_active]);
 
     s->request.seq = f->seq;
@@ -26,14 +26,14 @@ static uint32_t deliver(chips_slave_t* s) {
     s->request_crc = f->crc;
 
     s->rx_active ^= 1u;
-    chips_decoder_set_buffer(&s->link.dec, s->rx_payload[s->rx_active]);
+    chips_link_rx_swap(&s->link, s->rx_payload[s->rx_active]);
 
     s->state = CHIPS_SLAVE_PENDING;
     return CHIPS_SLAVE_EV_REQUEST;
 }
 
 static uint32_t on_frame(chips_slave_t* s) {
-    const chips_frame_t* f = &s->link.frame;
+    const chips_frame_t* f = chips_link_frame(&s->link);
 
     if (f->direction != CHIPS_DIR_REQUEST || s->state == CHIPS_SLAVE_PENDING) {
         return CHIPS_SLAVE_EV_RX_IGNORED;
@@ -63,18 +63,6 @@ static uint32_t receive(chips_slave_t* s) {
     }
 }
 
-static uint32_t transmit(chips_slave_t* s) {
-    switch (chips_link_write(&s->link)) {
-        case CHIPS_LINK_TX_DONE:
-            return CHIPS_SLAVE_EV_TX_FRAME;
-        case CHIPS_LINK_TX_ERROR:
-            return CHIPS_SLAVE_EV_TX_ERROR;
-        case CHIPS_LINK_TX_NONE:
-        default:
-            return CHIPS_SLAVE_EV_NONE;
-    }
-}
-
 static void release_request(chips_slave_t* s) {
     s->request = (chips_slave_request_t){0};
     s->state = CHIPS_SLAVE_LISTENING;
@@ -85,17 +73,17 @@ void chips_slave_init(chips_slave_t* s, const chips_port_t* port, const chips_ti
 
     *s = (chips_slave_t){0};
     chips_link_init(&s->link, port);
-    chips_decoder_init(&s->link.dec, s->rx_payload[s->rx_active]);
+    chips_link_rx_attach(&s->link, s->rx_payload[s->rx_active]);
     s->cache_window = chips_timing_cache_window(timing);
 }
 
 uint32_t chips_slave_step(chips_slave_t* s) {
     CHIPS_ASSERT(s != NULL);
 
-    expire_cache(s, s->link.port.now(s->link.port.ctx));
+    expire_cache(s, chips_link_now(&s->link));
 
     const uint32_t ev = receive(s);
-    return ev | transmit(s);
+    return ev | chips_link_write(&s->link);
 }
 
 const chips_slave_request_t* chips_slave_request(const chips_slave_t* s) {
@@ -118,7 +106,7 @@ chips_respond_status_t chips_slave_respond(chips_slave_t* s, const uint8_t* payl
     s->cached.seq = s->request.seq;
     s->cached.cmd = s->request.cmd;
     s->cached.crc = s->request_crc;
-    s->t_cached = s->link.port.now(s->link.port.ctx);
+    s->t_cached = chips_link_now(&s->link);
 
     release_request(s);
     return CHIPS_RESPOND_OK;

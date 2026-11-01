@@ -14,8 +14,9 @@ static uint32_t finish(chips_master_t* m, chips_outcome_t outcome, chips_time_t 
     m->result.outcome = outcome;
     m->result.latency = latency;
     if (outcome == CHIPS_OUTCOME_OK) {
-        m->result.payload = m->link.frame.payload;
-        m->result.payload_len = m->link.frame.payload_len;
+        const chips_frame_t* f = chips_link_frame(&m->link);
+        m->result.payload = f->payload;
+        m->result.payload_len = f->payload_len;
     }
 
     m->state = CHIPS_MASTER_IDLE;
@@ -23,7 +24,7 @@ static uint32_t finish(chips_master_t* m, chips_outcome_t outcome, chips_time_t 
 }
 
 static uint32_t on_frame(chips_master_t* m, chips_time_t now) {
-    const chips_frame_t* f = &m->link.frame;
+    const chips_frame_t* f = chips_link_frame(&m->link);
 
     if (f->direction != CHIPS_DIR_RESPONSE) {
         return CHIPS_EV_RX_REQUEST;
@@ -37,8 +38,6 @@ static uint32_t on_frame(chips_master_t* m, chips_time_t now) {
     return finish(m, CHIPS_OUTCOME_OK, chips_time_sub(now, m->t_start));
 }
 
-/* Decodes this step's chunk until it is used up or the transaction ends;
- * whatever is left is dropped. */
 static uint32_t receive(chips_master_t* m, chips_time_t now) {
     uint32_t ev = CHIPS_EV_NONE;
 
@@ -59,16 +58,11 @@ static uint32_t receive(chips_master_t* m, chips_time_t now) {
 }
 
 static uint32_t transmit(chips_master_t* m) {
-    switch (chips_link_write(&m->link)) {
-        case CHIPS_LINK_TX_DONE:
-            m->sent_ok = true;
-            return CHIPS_EV_TX_FRAME;
-        case CHIPS_LINK_TX_ERROR:
-            return CHIPS_EV_TX_ERROR;
-        case CHIPS_LINK_TX_NONE:
-        default:
-            return CHIPS_EV_NONE;
+    const uint32_t ev = chips_link_write(&m->link);
+    if (ev & CHIPS_EV_TX_FRAME) {
+        m->sent_ok = true;
     }
+    return ev;
 }
 
 static uint32_t next_slot(chips_master_t* m, chips_time_t now) {
@@ -131,7 +125,8 @@ chips_submit_status_t chips_master_submit(chips_master_t* m,
     if (response_buf == NULL || !chips_link_encode(&m->link, seq, CHIPS_DIR_REQUEST, cmd, payload, payload_len)) {
         return CHIPS_SUBMIT_INVALID_ARG;
     }
-    chips_decoder_init(&m->link.dec, response_buf);
+    chips_link_rx_attach(&m->link, response_buf);
+    chips_link_restart(&m->link);
 
     m->seq = seq;
     m->cmd = cmd;
@@ -142,33 +137,19 @@ chips_submit_status_t chips_master_submit(chips_master_t* m,
     m->result.seq = seq;
     m->result.cmd = cmd;
 
-    m->state = CHIPS_MASTER_ARMED;
+    m->t_start = chips_link_now(&m->link);
+    m->t_slot = m->t_start;
+    m->state = CHIPS_MASTER_WAITING;
     return CHIPS_SUBMIT_OK;
 }
 
 uint32_t chips_master_step(chips_master_t* m) {
     CHIPS_ASSERT(m != NULL);
 
-    const chips_time_t now = m->link.port.now(m->link.port.ctx);
-
-    switch (m->state) {
-        case CHIPS_MASTER_IDLE:
-            return idle_step(m);
-
-        case CHIPS_MASTER_ARMED:
-            m->t_start = now;
-            m->t_slot = now;
-            chips_link_restart(&m->link);
-            m->state = CHIPS_MASTER_WAITING;
-            return txn_step(m, now);
-
-        case CHIPS_MASTER_WAITING:
-            return txn_step(m, now);
-
-        default:
-            CHIPS_ASSERT(0);
-            return CHIPS_EV_NONE;
+    if (m->state == CHIPS_MASTER_IDLE) {
+        return idle_step(m);
     }
+    return txn_step(m, chips_link_now(&m->link));
 }
 
 bool chips_master_cancel(chips_master_t* m) {

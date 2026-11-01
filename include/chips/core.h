@@ -5,13 +5,15 @@
 
 /**
  * @file core.h
- * @brief CHIPS protocol core: framing, byte stuffing and CRC-16/Kermit.
+ * @brief CHIPS protocol core: framing, byte stuffing, CRC-16/Kermit and timing.
  *
  * Provides the building blocks for exchanging CHIPS packets over a byte
  * stream:
  *  - a table-driven CRC-16/Kermit implementation,
  *  - an encoder producing delimited, byte-stuffed wire frames,
- *  - a streaming decoder tolerant of arbitrary input fragmentation.
+ *  - a streaming decoder tolerant of arbitrary input fragmentation,
+ *  - wrapping-safe time arithmetic and the retransmission timing shared by
+ *    master and slave.
  *
  * Wire format (before byte stuffing, between #CHIPS_SYNC delimiters):
  * @verbatim
@@ -48,7 +50,7 @@
 #endif
 
 #ifndef CHIPS_NO_LIBC_STRING
-#include <string.h> // IWYU pragma: keep
+#include <string.h>  // IWYU pragma: keep
 #endif
 
 #ifndef CHIPS_CRC16_KERMIT_FOLD
@@ -179,7 +181,7 @@ typedef struct {
     uint8_t cmd;                 /**< Command identifier. */
     const uint8_t* payload;      /**< Payload data. */
     size_t payload_len;          /**< Payload length in bytes. */
-    uint16_t crc;                /**< Kermit 16 crc */
+    uint16_t crc;                /**< CRC-16/Kermit received with the frame. */
 } chips_frame_t;
 
 /** @brief Decoder receive state. @internal */
@@ -198,7 +200,7 @@ typedef struct {
     uint8_t* payload;               /**< User-supplied payload buffer. */
     size_t len;                     /**< Bytes received in current frame. */
     uint8_t hdr[CHIPS_HEADER_SIZE]; /**< Received header bytes. */
-    uint8_t spill[CHIPS_CRC_SIZE];  /**< Last two bytes received: the CRC once the frame closes. */
+    uint8_t spill[CHIPS_CRC_SIZE];  /**< Frame bytes past header + #CHIPS_MAX_PAYLOAD: CRC of a full-size frame. */
     chips_rx_state_t state;         /**< Receive state. */
 } chips_decoder_t;
 

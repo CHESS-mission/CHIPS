@@ -32,14 +32,14 @@ typedef enum {
 /** @brief Event bits returned by chips_slave_step(). */
 enum {
     CHIPS_SLAVE_EV_NONE = 0u,
-    CHIPS_SLAVE_EV_REQUEST = 1u << 0,      /**< New request pending; see chips_slave_request(). */
-    CHIPS_SLAVE_EV_TX_FRAME = 1u << 1,     /**< A full copy of a response reached the port. */
-    CHIPS_SLAVE_EV_RETRANSMIT = 1u << 2,   /**< Duplicate request answered from the cache. */
-    CHIPS_SLAVE_EV_TX_ERROR = 1u << 3,     /**< Port write failed; that copy is abandoned. Part of it may
-                                                already be on the line. */
-    CHIPS_SLAVE_EV_RX_ERROR = 1u << 4,     /**< Port read failed; partial frame discarded. */
-    CHIPS_SLAVE_EV_RX_BAD_FRAME = 1u << 5, /**< Decoder rejected a frame (escape, length, CRC). */
-    CHIPS_SLAVE_EV_RX_IGNORED = 1u << 6    /**< Valid frame not acted on (busy, pending copy, response). */
+    CHIPS_SLAVE_EV_REQUEST = 1u << 0,                         /**< New request pending; see chips_slave_request(). */
+    CHIPS_SLAVE_EV_TX_FRAME = CHIPS_LINK_EV_TX_FRAME,         /**< A full copy of a response reached the port. */
+    CHIPS_SLAVE_EV_TX_ERROR = CHIPS_LINK_EV_TX_ERROR,         /**< Port write failed; that copy is abandoned. Part
+                                                                   of it may already be on the line. */
+    CHIPS_SLAVE_EV_RX_ERROR = CHIPS_LINK_EV_RX_ERROR,         /**< Port read failed; partial frame discarded. */
+    CHIPS_SLAVE_EV_RX_BAD_FRAME = CHIPS_LINK_EV_RX_BAD_FRAME, /**< Decoder rejected a frame (escape, length, CRC). */
+    CHIPS_SLAVE_EV_RETRANSMIT = 1u << 5,                      /**< Duplicate request answered from the cache. */
+    CHIPS_SLAVE_EV_RX_IGNORED = 1u << 6 /**< Valid frame not acted on (pending request, copy in flight, response). */
 };
 
 /**
@@ -182,4 +182,4 @@ chips_slave_state_t chips_slave_state(const chips_slave_t* s);
 }
 #endif
 
-#endif
+#endif /* CHIPS_SLAVE_H */

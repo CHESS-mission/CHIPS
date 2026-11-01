@@ -38,4 +38,6 @@ endfunction()
 
 chips_add_test(core)
 chips_add_test(master)
+chips_add_test(master_rx)
+chips_add_test(master_timing)
 chips_add_test(slave)

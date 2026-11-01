@@ -29,8 +29,9 @@ typedef enum {
 /**
  * @brief Byte stream and clock a state machine runs on.
  *
- * All three functions must return immediately. They are only ever called
- * from the owning state machine's step function.
+ * All three functions must return immediately. write and read are only
+ * ever called from the owning state machine's step function; now is also
+ * called by chips_master_submit() and chips_slave_respond().
  */
 typedef struct {
     /**

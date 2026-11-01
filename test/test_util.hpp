@@ -15,7 +15,6 @@
 #include <iomanip>
 #include <limits>
 #include <ostream>
-#include <utility>
 #include <vector>
 
 #include "chips/core.h"
@@ -70,10 +69,6 @@ constexpr chips_time_t Ms(uint64_t ms) {
 }
 
 using Bytes = std::vector<uint8_t>;
-
-using IoStatus = decltype(std::declval<chips_port_t>().write(nullptr, nullptr, 0, nullptr));
-
-inline const IoStatus k_io_fail = static_cast<IoStatus>(static_cast<int>(CHIPS_IO_OK) + 1);
 
 constexpr chips_time_t K_RESEND_PERIOD = Ms(1000u);
 constexpr uint8_t K_MAX_RESENDS = 2u;
@@ -165,12 +160,12 @@ struct FakePort {
         return p;
     }
 
-    static IoStatus Write(void* ctx, const uint8_t* buf, size_t len, size_t* written) {
+    static chips_io_status_t Write(void* ctx, const uint8_t* buf, size_t len, size_t* written) {
         auto* self = static_cast<FakePort*>(ctx);
         self->write_calls++;
         *written = 0;
         if (self->fail_write) {
-            return k_io_fail;
+            return CHIPS_IO_ERROR;
         }
         const size_t n = std::min(len, self->max_write);
         self->tx.insert(self->tx.end(), buf, buf + n);
@@ -178,12 +173,12 @@ struct FakePort {
         return CHIPS_IO_OK;
     }
 
-    static IoStatus Read(void* ctx, uint8_t* buf, size_t cap, size_t* n) {
+    static chips_io_status_t Read(void* ctx, uint8_t* buf, size_t cap, size_t* n) {
         auto* self = static_cast<FakePort*>(ctx);
         self->read_calls++;
         *n = 0;
         if (self->fail_read) {
-            return k_io_fail;
+            return CHIPS_IO_ERROR;
         }
         const size_t k = std::min(cap, std::min(self->max_read, self->rx.size()));
         for (size_t i = 0; i < k; ++i) {

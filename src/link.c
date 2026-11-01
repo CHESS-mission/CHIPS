@@ -14,6 +14,18 @@ void chips_link_init(chips_link_t* l, const chips_port_t* port) {
     chips_decoder_init(&l->dec, NULL);
 }
 
+chips_time_t chips_link_now(const chips_link_t* l) {
+    return l->port.now(l->port.ctx);
+}
+
+void chips_link_rx_attach(chips_link_t* l, uint8_t payload_buf[CHIPS_MAX_PAYLOAD]) {
+    chips_decoder_init(&l->dec, payload_buf);
+}
+
+void chips_link_rx_swap(chips_link_t* l, uint8_t payload_buf[CHIPS_MAX_PAYLOAD]) {
+    chips_decoder_set_buffer(&l->dec, payload_buf);
+}
+
 bool chips_link_encode(chips_link_t* l,
                        uint8_t seq,
                        chips_direction_t direction,
@@ -41,21 +53,21 @@ bool chips_link_tx_busy(const chips_link_t* l) {
     return l->tx_off < l->tx_len;
 }
 
-chips_link_tx_t chips_link_write(chips_link_t* l) {
+uint32_t chips_link_write(chips_link_t* l) {
     if (!chips_link_tx_busy(l)) {
-        return CHIPS_LINK_TX_NONE;
+        return 0u;
     }
 
     const size_t want = l->tx_len - l->tx_off;
     size_t written = 0;
     if (l->port.write(l->port.ctx, &l->tx_frame[l->tx_off], want, &written) != CHIPS_IO_OK) {
         chips_link_abort(l);
-        return CHIPS_LINK_TX_ERROR;
+        return CHIPS_LINK_EV_TX_ERROR;
     }
     CHIPS_ASSERT(written <= want);
     l->tx_off += (written < want) ? written : want;
 
-    return chips_link_tx_busy(l) ? CHIPS_LINK_TX_NONE : CHIPS_LINK_TX_DONE;
+    return chips_link_tx_busy(l) ? 0u : CHIPS_LINK_EV_TX_FRAME;
 }
 
 bool chips_link_read(chips_link_t* l) {
@@ -78,6 +90,10 @@ chips_dec_status_t chips_link_next(chips_link_t* l) {
     CHIPS_ASSERT(st != CHIPS_DEC_ERR_ARG);
     l->rx_pos += used;
     return st;
+}
+
+const chips_frame_t* chips_link_frame(const chips_link_t* l) {
+    return &l->frame;
 }
 
 size_t chips_link_unread(const chips_link_t* l) {

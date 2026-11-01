@@ -64,12 +64,12 @@ typedef enum {
 /** @brief Event bits returned by chips_master_step(). */
 enum {
     CHIPS_EV_NONE = 0u,
-    CHIPS_EV_DONE = 1u << 0,           /**< Transaction finished; see chips_master_result(). */
-    CHIPS_EV_TX_FRAME = 1u << 1,       /**< A full copy of the request reached the port. */
-    CHIPS_EV_TX_ERROR = 1u << 2,       /**< Port write failed; copy abandoned until next resend slot. Part of it
-                                            may already be on the line. */
-    CHIPS_EV_RX_ERROR = 1u << 3,       /**< Port read failed; partial frame discarded. */
-    CHIPS_EV_RX_BAD_FRAME = 1u << 4,   /**< Decoder rejected a frame (escape, length, CRC). */
+    CHIPS_EV_DONE = 1u << 0,                            /**< Transaction finished; see chips_master_result(). */
+    CHIPS_EV_TX_FRAME = CHIPS_LINK_EV_TX_FRAME,         /**< A full copy of the request reached the port. */
+    CHIPS_EV_TX_ERROR = CHIPS_LINK_EV_TX_ERROR,         /**< Port write failed; copy abandoned until next resend
+                                                             slot. Part of it may already be on the line. */
+    CHIPS_EV_RX_ERROR = CHIPS_LINK_EV_RX_ERROR,         /**< Port read failed; partial frame discarded. */
+    CHIPS_EV_RX_BAD_FRAME = CHIPS_LINK_EV_RX_BAD_FRAME, /**< Decoder rejected a frame (escape, length, CRC). */
     CHIPS_EV_RX_STALE = 1u << 5,       /**< Response with another sequence (or before first send) ignored. */
     CHIPS_EV_RX_DROPPED = 1u << 6,     /**< Bytes read but not decoded (idle or after completion). */
     CHIPS_EV_RX_REQUEST = 1u << 7,     /**< Frame flagged as a request ignored (e.g. line echo). */
@@ -90,7 +90,7 @@ typedef struct {
      */
     const uint8_t* payload;
     size_t payload_len;   /**< Response payload length when OK, else 0. */
-    chips_time_t latency; /**< First step to completion; 0 if cancelled before the first step. */
+    chips_time_t latency; /**< Submit to completion; 0 if cancelled. */
 } chips_master_result_t;
 
 /* ------------------------------------------------------------------------- */
@@ -100,7 +100,6 @@ typedef struct {
 /** @brief Master state. */
 typedef enum {
     CHIPS_MASTER_IDLE = 0, /**< No request in flight. */
-    CHIPS_MASTER_ARMED,    /**< Submitted; waiting for the first step. */
     CHIPS_MASTER_WAITING   /**< Sending and waiting for the response. */
 } chips_master_state_t;
 
@@ -122,7 +121,7 @@ typedef struct {
     chips_master_state_t state;
     uint8_t seq;
     uint8_t cmd;
-    chips_time_t t_start; /**< Time of the first step. */
+    chips_time_t t_start; /**< Time of submit. */
     chips_time_t t_slot;  /**< Start time of the current resend slot. */
     uint8_t resends;      /**< Resend slots used, including any that found a copy still being written. */
     bool sent_ok;         /**< At least one copy was fully written. */
@@ -149,7 +148,9 @@ typedef struct {
 void chips_master_init(chips_master_t* m, const chips_port_t* port, const chips_timing_t* timing);
 
 /**
- * @brief Queue a request. No I/O happens until the next step.
+ * @brief Queue a request. Nothing is written or read until the next step.
+ *
+ * Reads the clock: the deadline and the latency run from this call.
  *
  * Clears the previous result (including its payload pointer).
  *
@@ -171,7 +172,7 @@ void chips_master_init(chips_master_t* m, const chips_port_t* port, const chips_
  *    they are unspecified.
  *  - Once the transaction has ended, the buffer is the application's again.
  *
- * The request is sent on the first step and resent as described in
+ * The request is sent on the next step and resent as described in
  * docs/PROTOCOL.md §4.2.
  *
  * @param m            Instance.

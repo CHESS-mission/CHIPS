@@ -29,12 +29,17 @@
 extern "C" {
 #endif
 
-/** @brief Result of chips_link_write(). */
-typedef enum {
-    CHIPS_LINK_TX_NONE = 0, /**< Nothing to write, or the copy is not complete yet. */
-    CHIPS_LINK_TX_DONE,     /**< The last byte of the copy reached the port. */
-    CHIPS_LINK_TX_ERROR     /**< Port write failed; the copy is abandoned. */
-} chips_link_tx_t;
+/**
+ * @brief Event bits shared by the master and slave event sets.
+ *
+ * Bit 0 is left to the master and slave for their own completion event.
+ */
+enum {
+    CHIPS_LINK_EV_TX_FRAME = 1u << 1,    /**< The last byte of a copy reached the port. */
+    CHIPS_LINK_EV_TX_ERROR = 1u << 2,    /**< Port write failed; the copy is abandoned. */
+    CHIPS_LINK_EV_RX_ERROR = 1u << 3,    /**< Port read failed; partial frame discarded. */
+    CHIPS_LINK_EV_RX_BAD_FRAME = 1u << 4 /**< Decoder rejected a frame (escape, length, CRC). */
+};
 
 /** @brief Link state. Treat as opaque. */
 typedef struct {
@@ -55,6 +60,23 @@ typedef struct {
 
 /** @brief Clear all state and bind @p port. The decoder has no buffer yet. */
 void chips_link_init(chips_link_t* l, const chips_port_t* port);
+
+/** @brief Read the port's clock. */
+chips_time_t chips_link_now(const chips_link_t* l);
+
+/**
+ * @brief Decode into @p payload_buf from now on, discarding any partially
+ *        received frame.
+ */
+void chips_link_rx_attach(chips_link_t* l, uint8_t payload_buf[CHIPS_MAX_PAYLOAD]);
+
+/**
+ * @brief Decode into @p payload_buf from now on, keeping the framing state.
+ *
+ * For use right after chips_link_next() returned #CHIPS_DEC_FRAME, so the
+ * frame's payload stays in the old buffer; see chips_decoder_set_buffer().
+ */
+void chips_link_rx_swap(chips_link_t* l, uint8_t payload_buf[CHIPS_MAX_PAYLOAD]);
 
 /**
  * @brief Replace the outgoing frame, cutting short any copy in flight.
@@ -80,8 +102,13 @@ void chips_link_abort(chips_link_t* l);
 /** @brief true while a copy is being written. */
 bool chips_link_tx_busy(const chips_link_t* l);
 
-/** @brief Write as much of the current copy as the port accepts. */
-chips_link_tx_t chips_link_write(chips_link_t* l);
+/**
+ * @brief Write as much of the current copy as the port accepts.
+ *
+ * @return #CHIPS_LINK_EV_TX_FRAME when the copy is complete,
+ *         #CHIPS_LINK_EV_TX_ERROR on a port error, else 0.
+ */
+uint32_t chips_link_write(chips_link_t* l);
 
 /**
  * @brief Read one chunk from the port, discarding any undecoded bytes of the
@@ -92,12 +119,15 @@ chips_link_tx_t chips_link_write(chips_link_t* l);
 bool chips_link_read(chips_link_t* l);
 
 /**
- * @brief Decode the next frame from the current chunk into @c l->frame.
+ * @brief Decode the next frame from the current chunk; see chips_link_frame().
  *
  * @return #CHIPS_DEC_FRAME, an error status for a rejected frame, or
  *         #CHIPS_DEC_NEED_MORE once the chunk is used up.
  */
 chips_dec_status_t chips_link_next(chips_link_t* l);
+
+/** @brief The frame decoded by the last chips_link_next() that returned #CHIPS_DEC_FRAME. */
+const chips_frame_t* chips_link_frame(const chips_link_t* l);
 
 /** @brief Bytes of the current chunk not decoded yet. */
 size_t chips_link_unread(const chips_link_t* l);
